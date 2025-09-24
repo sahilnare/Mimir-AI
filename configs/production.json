@@ -1,9 +1,9 @@
 {
     "db": {
         "host": "db-for-ai.test-url.amazonaws.com",
-        "dbname": "testdb",
-        "username": "openleaf",
-        "password": "testpassword",
+        "dbname": "productiondb",
+        "username": "ai_agent",
+        "password": "mimir123",
         "port": 5432
     },
     "OPENAI_API_KEY": "sk-proj-103m-testkey",

@@ -18,7 +18,7 @@ import re
 from smolagents import tool, CodeAgent, HfApiModel
 
 engine = create_engine(
-    f"postgresql://openleaf:testpassword@localhost:63333/testdb"
+    f"postgresql://ai_agent:mimir123@localhost:63333/productiondb"
 )
 
 inspector = inspect(engine)

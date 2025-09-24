@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage
 
 from langgraph.prebuilt import create_react_agent
 
-db = SQLDatabase.from_uri("postgresql://openleaf:testpassword@localhost:63333/testdb")
+db = SQLDatabase.from_uri("postgresql://ai_agent:mimir123@localhost:63333/productiondb")
 
 print(db.get_table_names())
 

@@ -14,8 +14,8 @@ if [ -z "${APP_ENV}" ]; then
     ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -i /root/.ssh/sandbox_key.pem \
-        -f -N -L 63333:sandbox-db.test-url.amazonaws.com:5432 \
-        ubuntu@test-url.ap-west-1.compute.amazonaws.com
+        -f -N -L 63333:db-sandbox-for-ai.cyuh3uofyiy4.ap-south-1.rds.amazonaws.com:5432 \
+        ubuntu@ec2-13-127-111-83.ap-south-1.compute.amazonaws.com
 
     # Wait for tunnel to establish
     sleep 2

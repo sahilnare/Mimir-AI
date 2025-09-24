@@ -1,16 +1,16 @@
 {
     "ssh": {
-        "bastion_host": "test-url.ap-west-1.compute.amazonaws.com",
+        "bastion_host": "ec2-13-127-111-83.ap-south-1.compute.amazonaws.com",
         "bastion_user": "ubuntu",
-        "database_host": "sandbox-db.test-url.amazonaws.com",
+        "database_host": "db-sandbox-for-ai.cyuh3uofyiy4.ap-south-1.rds.amazonaws.com",
         "database_port": "5432",
         "local_port": "63333"
     },
     "db": {
         "host": "localhost",
-        "dbname": "testdb",
-        "username": "openleaf",
-        "password": "testpassword",
+        "dbname": "productiondb",
+        "username": "ai_agent",
+        "password": "mimir123",
         "port": 63333
     },
     "OPENAI_API_KEY": "sk-proj-103m-testkey",

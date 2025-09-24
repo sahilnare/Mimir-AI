@@ -538,13 +538,13 @@ def text2sql_with_analysis_agent(db):
     return workflow
 
 # Usage example
-# dbconn = SQLDatabase.from_uri("postgresql://openleaf:testpassword@localhost:63333/testdb")
+# dbconn = SQLDatabase.from_uri("postgresql://ai_agent:mimir123@localhost:63333/productiondb")
 # app = text2sql_with_analysis_agent(db=dbconn)
 
 # messages = app.invoke({"messages": [(
 #     "user","Give me the count of all delivered orders in Tier 2 Indian Cities"
 # )]})
-# dbconn = SQLDatabase.from_uri("postgresql://openleaf:testpassword@localhost:63333/testdb")
+# dbconn = SQLDatabase.from_uri("postgresql://ai_agent:mimir123@localhost:63333/productiondb")
 # app = text2sql_agent(db=dbconn)
 
 # for event in app.stream(
