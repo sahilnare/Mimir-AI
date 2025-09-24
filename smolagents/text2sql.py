@@ -190,6 +190,6 @@ sql_engine.description += f"\n\nDetailed Schema:\n{get_table_schema()}"
 
 print(sql_engine.description)
 
-agent = CodeAgent(tools=[chat, sql_engine], model=HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct", token= "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"),)
+agent = CodeAgent(tools=[chat, sql_engine], model=HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct", token= "test"),)
 
 agent.run("Get destination locations and frequency of top 20 RTO orders and classify them into indian geographical regions.")
