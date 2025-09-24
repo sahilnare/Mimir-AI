@@ -1,0 +1,15 @@
+{
+    "db": {
+        "host": "db-for-ai.test-url.amazonaws.com",
+        "dbname": "testdb",
+        "username": "openleaf",
+        "password": "testpassword",
+        "port": 5432
+    },
+    "OPENAI_API_KEY": "sk-proj-103m-testkeys",
+    "aws": {
+        "AWS_ACCESS_KEY_ID": "testkey",
+        "AWS_SECRET_ACCESS_KEY": "testkey",
+        "AWS_REGION": "us-east-1"
+    }
+}

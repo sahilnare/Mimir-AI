@@ -1,0 +1,22 @@
+{
+    "ssh": {
+        "bastion_host": "test-url.ap-west-1.compute.amazonaws.com",
+        "bastion_user": "ubuntu",
+        "database_host": "sandbox-db.test-url.amazonaws.com",
+        "database_port": "5432",
+        "local_port": "63333"
+    },
+    "db": {
+        "host": "localhost",
+        "dbname": "testdb",
+        "username": "openleaf",
+        "password": "testpassword",
+        "port": 63333
+    },
+    "OPENAI_API_KEY": "sk-proj-103m-testkey",
+    "aws": {
+        "AWS_ACCESS_KEY_ID": "testkey",
+        "AWS_SECRET_ACCESS_KEY": "testkey",
+        "AWS_REGION": "us-east-1"
+    }
+}
