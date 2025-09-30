@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks, Runn
 from langgraph.prebuilt import ToolNode
 
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from langchain_core.tools import tool
 
@@ -174,7 +174,9 @@ def create_model_check_query(db_query_tool):
             MessagesPlaceholder(variable_name="messages")
         ])
 
-        query_check = query_check_prompt | ChatOpenAI(model="gpt-4o", temperature=0).bind_tools(
+        query_check = query_check_prompt | ChatGoogleGenerativeAI(temperature=0,
+            model="gemini-1.5-flash",
+            api_key=os.getenv("GOOGLE_API_KEY")).bind_tools(
             [db_query_tool], 
             tool_choice="required"
         )
@@ -224,7 +226,9 @@ def query_gen_node(state: State):
             [("system", query_gen_system), ("placeholder", "{messages}")]
         )
 
-    query_gen = query_gen_prompt | ChatOpenAI(model="gpt-4o", temperature=0).bind_tools([SubmitFinalAnswer])
+    query_gen = query_gen_prompt | ChatGoogleGenerativeAI(temperature=0.3,
+            model="gemini-1.5-flash",
+            api_key=os.getenv("GOOGLE_API_KEY")).bind_tools([SubmitFinalAnswer])
 
     message = query_gen.invoke(state)
 
@@ -375,7 +379,7 @@ def create_analysis_agent():
         f"{analysis_system_prompt}\n\nUser Query: {{query_intent}}\n\nData from SQL Query: {{data}}"
     )
     
-    analysis_chain = analysis_prompt | ChatOpenAI(model="o1-preview", temperature=1)
+    analysis_chain = analysis_prompt | ChatGoogleGenerativeAI(model="gemini-pro", api_key=config.google_api_key)
     
     return analysis_chain
 
@@ -500,7 +504,7 @@ def should_continue_analytics(state: State) -> Literal[END, "correct_query", "qu
 
 def text2sql_with_analysis_agent(db):
 
-    toolkit = SQLDatabaseToolkit(db=db, llm=ChatOpenAI(model="gpt-4o"))
+    toolkit = SQLDatabaseToolkit(db=db, llm=ChatGoogleGenerativeAI(model="gemini-pro"), api_key=os.getenv("GOOGLE_API_KEY"))
     tools = toolkit.get_tools()
     list_tables_tool = filtered_table_list 
     get_schema_tool = next(tool for tool in tools if tool.name == "sql_db_schema")
@@ -512,7 +516,7 @@ def text2sql_with_analysis_agent(db):
     workflow.add_node("list_tables_tool", create_tool_node_with_fallback([list_tables_tool]))
     workflow.add_node("get_schema_tool", create_tool_node_with_fallback([get_schema_tool]))
     
-    model_get_schema = ChatOpenAI(model="gpt-4o", temperature=0).bind_tools([get_schema_tool])
+    model_get_schema = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, api_key=os.getenv("GOOGLE_API_KEY")).bind_tools([get_schema_tool])
     workflow.add_node("model_get_schema", lambda state: {"messages": [model_get_schema.invoke(filter_messages(state["messages"]))]})    
     
     workflow.add_node("query_gen", query_gen_node)
@@ -538,13 +542,13 @@ def text2sql_with_analysis_agent(db):
     return workflow
 
 # Usage example
-# dbconn = SQLDatabase.from_uri("postgresql://ai_agent:mimir123@localhost:63333/productiondb")
+# dbconn = SQLDatabase.from_uri("postgresql://openleaf:testpassword@localhost:63333/testdb")
 # app = text2sql_with_analysis_agent(db=dbconn)
 
 # messages = app.invoke({"messages": [(
 #     "user","Give me the count of all delivered orders in Tier 2 Indian Cities"
 # )]})
-# dbconn = SQLDatabase.from_uri("postgresql://ai_agent:mimir123@localhost:63333/productiondb")
+# dbconn = SQLDatabase.from_uri("postgresql://openleaf:testpassword@localhost:63333/testdb")
 # app = text2sql_agent(db=dbconn)
 
 # for event in app.stream(

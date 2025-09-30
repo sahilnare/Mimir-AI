@@ -18,7 +18,7 @@ import re
 from smolagents import tool, CodeAgent, HfApiModel
 
 engine = create_engine(
-    f"postgresql://ai_agent:mimir123@localhost:63333/productiondb"
+    f"postgresql://openleaf:testpassword@localhost:63333/testdb"
 )
 
 inspector = inspect(engine)
@@ -190,6 +190,6 @@ sql_engine.description += f"\n\nDetailed Schema:\n{get_table_schema()}"
 
 print(sql_engine.description)
 
-agent = CodeAgent(tools=[chat, sql_engine], model=HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct", token= "test"),)
+agent = CodeAgent(tools=[chat, sql_engine], model=HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct", token= "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"),)
 
 agent.run("Get destination locations and frequency of top 20 RTO orders and classify them into indian geographical regions.")

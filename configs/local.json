@@ -13,10 +13,15 @@
         "password": "mimir123",
         "port": 63333
     },
-    "OPENAI_API_KEY": "sk-proj-103m-testkey",
     "aws": {
         "AWS_ACCESS_KEY_ID": "testkey",
         "AWS_SECRET_ACCESS_KEY": "testkey",
         "AWS_REGION": "us-east-1"
-    }
+    },
+
+    "schema_docs_path": "resources/ddls.json",
+    "chroma_db_path": "./chroma_db",
+    "collection_name": "sql_queries",
+    "GOOGLE_API_KEY": "your api key"
+
 }

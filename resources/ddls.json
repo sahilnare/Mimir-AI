@@ -1,0 +1,484 @@
+{
+  "databases": [
+    {
+      "database_name": "productiondb",
+      "tables": [
+        {
+          "table_name": "tracking_orders",
+          "description": "Contains data regarding the journey of the order and tracking information from hub to hub",
+          "columns": [
+            {
+              "column_name": "track_id",
+              "data_type": "uuid",
+              "description": "Primary key, unique identifier for tracking record"
+            },
+            {
+              "column_name": "order_id",
+              "data_type": "uuid",
+              "description": "Order identifier, links to orders table"
+            },
+            {
+              "column_name": "original_order_id",
+              "data_type": "VARCHAR(63)",
+              "description": "Seller's order ID"
+            },
+            {
+              "column_name": "carrier_name",
+              "data_type": "VARCHAR(63)",
+              "description": "Name of the carrier (courier partner)"
+            },
+            {
+              "column_name": "current_order_status",
+              "data_type": "VARCHAR(31)",
+              "description": "Current tracking status of the shipment. Possible values: CANCELLED, ORDERED, PICKED UP, IN TRANSIT, OUT FOR DELIVERY, DELIVERED, UNDELIVERED, RTO IN TRANSIT, RTO DELIVERED, RTO, RTO OFD, DELAYED, LOST, DAMAGED, OUT FOR PICKUP, PICKUP RESCHEDULED, PICKUP EXCEPTION, RTO INITIATED, RTO NDR, MISROUTED, CHANNEL_ORDER"
+            },
+            {
+              "column_name": "current_order_status_code",
+              "data_type": "VARCHAR(31)",
+              "description": "Standardized code for the tracking status"
+            },
+            {
+              "column_name": "tracking_link",
+              "data_type": "VARCHAR(255)",
+              "description": "URL link for tracking the shipment"
+            },
+            {
+              "column_name": "status_dates",
+              "data_type": "JSONB",
+              "description": "Array containing the tracking data of the order journey from hub to hub"
+            },
+            {
+              "column_name": "awbno",
+              "data_type": "VARCHAR(63)",
+              "description": "Air Waybill Number - unique ID of the shipment given by the carrier"
+            },
+            {
+              "column_name": "origin_city",
+              "data_type": "VARCHAR(63)",
+              "description": "City where the shipment originated"
+            },
+            {
+              "column_name": "destination_city",
+              "data_type": "VARCHAR(63)",
+              "description": "City where the shipment is being delivered"
+            },
+            {
+              "column_name": "ordered_date",
+              "data_type": "DATE",
+              "description": "Date when the order was manifested"
+            },
+            {
+              "column_name": "ordered_time",
+              "data_type": "VARCHAR(15)",
+              "description": "Time when the order was manifested"
+            },
+            {
+              "column_name": "expected_delivery_date",
+              "data_type": "VARCHAR(31)",
+              "description": "Expected date of delivery for the shipment"
+            },
+            {
+              "column_name": "last_updated_time",
+              "data_type": "VARCHAR(15)",
+              "description": "Time when the tracking information was last updated"
+            },
+            {
+              "column_name": "last_updated_date",
+              "data_type": "DATE",
+              "description": "Date when the tracking information was last updated"
+            },
+            {
+              "column_name": "shipping_zone",
+              "data_type": "VARCHAR(15)",
+              "description": "Zone classification of the shipment"
+            },
+            {
+              "column_name": "feedback_link",
+              "data_type": "VARCHAR(255)",
+              "description": "URL link for providing feedback"
+            },
+            {
+              "column_name": "carrier_nickname",
+              "data_type": "VARCHAR(51)",
+              "description": "Nickname or alias for the carrier"
+            },
+            {
+              "column_name": "sla_breach",
+              "data_type": "BOOLEAN",
+              "description": "Indicates if the order is breaching Service Level Agreement (default: FALSE)"
+            },
+            {
+              "column_name": "pickup_date",
+              "data_type": "VARCHAR(15)",
+              "description": "Date when the shipment was picked up"
+            },
+            {
+              "column_name": "ofd_date",
+              "data_type": "VARCHAR(15)",
+              "description": "Date when the shipment is out for delivery"
+            }
+          ]
+        },
+        {
+          "table_name": "orders",
+          "description": "Connects order_id to user_id and contains basic order and carrier information",
+          "columns": [
+            {
+              "column_name": "order_id",
+              "data_type": "uuid",
+              "description": "Primary key, unique order identifier"
+            },
+            {
+              "column_name": "user_id",
+              "data_type": "uuid",
+              "description": "User identifier, links to the user who created the order"
+            },
+            {
+              "column_name": "carrier",
+              "data_type": "VARCHAR(31)",
+              "description": "Carrier name (courier partner)"
+            },
+            {
+              "column_name": "carrier_id",
+              "data_type": "VARCHAR(31)",
+              "description": "ID of the carrier (courier partner)"
+            },
+            {
+              "column_name": "valid_key",
+              "data_type": "uuid",
+              "description": "Validation key for the order"
+            },
+            {
+              "column_name": "account_type",
+              "data_type": "VARCHAR(31)",
+              "description": "Type of account associated with the order"
+            }
+          ]
+        },
+        {
+          "table_name": "order_details",
+          "description": "Contains detailed information about orders including customer details, item details, invoice value, COD amount, order type, dimensions, and seller order ID",
+          "columns": [
+            {
+              "column_name": "details_id",
+              "data_type": "uuid",
+              "description": "Primary key, unique identifier for order details record"
+            },
+            {
+              "column_name": "order_id",
+              "data_type": "uuid",
+              "description": "Order identifier, links to orders table"
+            },
+            {
+              "column_name": "awb_no",
+              "data_type": "VARCHAR(63)",
+              "description": "Air Waybill Number - unique ID of the shipment given by the carrier"
+            },
+            {
+              "column_name": "original_order_id",
+              "data_type": "VARCHAR(63)",
+              "description": "Seller's order ID"
+            },
+            {
+              "column_name": "order_items",
+              "data_type": "JSONB",
+              "description": "Array of order items containing name, selling price, quantity, and SKU"
+            },
+            {
+              "column_name": "carrier",
+              "data_type": "VARCHAR(31)",
+              "description": "Name of the carrier (courier partner)"
+            },
+            {
+              "column_name": "order_created_date",
+              "data_type": "DATE",
+              "description": "Date when the order was manifested"
+            },
+            {
+              "column_name": "order_created_time",
+              "data_type": "VARCHAR(15)",
+              "description": "Time when the order was manifested"
+            },
+            {
+              "column_name": "warehouse_name",
+              "data_type": "VARCHAR(127)",
+              "description": "Name of the pickup location"
+            },
+            {
+              "column_name": "customer_name",
+              "data_type": "VARCHAR(255)",
+              "description": "Name of the customer receiving the order"
+            },
+            {
+              "column_name": "customer_address",
+              "data_type": "VARCHAR(300)",
+              "description": "Delivery address of the customer"
+            },
+            {
+              "column_name": "customer_phone",
+              "data_type": "VARCHAR(31)",
+              "description": "Primary phone number of the customer"
+            },
+            {
+              "column_name": "customer_alternate_phone",
+              "data_type": "VARCHAR(31)",
+              "description": "Alternate phone number of the customer"
+            },
+            {
+              "column_name": "customer_pincode",
+              "data_type": "VARCHAR(15)",
+              "description": "Postal code of the customer's delivery address"
+            },
+            {
+              "column_name": "customer_city",
+              "data_type": "VARCHAR(63)",
+              "description": "City of the customer's delivery address"
+            },
+            {
+              "column_name": "customer_state",
+              "data_type": "VARCHAR(63)",
+              "description": "State of the customer's delivery address"
+            },
+            {
+              "column_name": "customer_email",
+              "data_type": "VARCHAR(63)",
+              "description": "Email address of the customer"
+            },
+            {
+              "column_name": "dimensions",
+              "data_type": "JSONB",
+              "description": "JSON containing length, breadth, height, and weight of the package"
+            },
+            {
+              "column_name": "invoice_value",
+              "data_type": "VARCHAR(31)",
+              "description": "Total value of all order items"
+            },
+            {
+              "column_name": "invoice_number",
+              "data_type": "VARCHAR(63)",
+              "description": "Invoice number for the order"
+            },
+            {
+              "column_name": "cod_amount",
+              "data_type": "VARCHAR(15)",
+              "description": "Cash on Delivery amount to be collected from buyer"
+            },
+            {
+              "column_name": "reference_number",
+              "data_type": "VARCHAR(63)",
+              "description": "Reference number for the order"
+            },
+            {
+              "column_name": "taxable_value",
+              "data_type": "VARCHAR(15)",
+              "description": "Taxable value of the order"
+            },
+            {
+              "column_name": "tax_percentage",
+              "data_type": "VARCHAR(15)",
+              "description": "Tax percentage applied to the order"
+            },
+            {
+              "column_name": "order_type",
+              "data_type": "VARCHAR(15)",
+              "description": "Type of payment - COD (Cash on Delivery) or PREPAID"
+            },
+            {
+              "column_name": "order_mode",
+              "data_type": "VARCHAR(15)",
+              "description": "Shipping mode - SURFACE or EXPRESS"
+            },
+            {
+              "column_name": "ewaybill_serial_number",
+              "data_type": "VARCHAR(31)",
+              "description": "E-way bill serial number for tax compliance"
+            },
+            {
+              "column_name": "hsn_code",
+              "data_type": "VARCHAR(31)",
+              "description": "Harmonized System of Nomenclature code for product classification"
+            },
+            {
+              "column_name": "gst_details",
+              "data_type": "JSONB",
+              "description": "JSON containing GST (Goods and Services Tax) details"
+            },
+            {
+              "column_name": "price_of_shipment",
+              "data_type": "VARCHAR(31)",
+              "description": "Shipping cost charged for the shipment"
+            },
+            {
+              "column_name": "marketplace",
+              "data_type": "VARCHAR(63)",
+              "description": "Marketplace or sales channel from which the order originated"
+            },
+            {
+              "column_name": "order_note",
+              "data_type": "VARCHAR(255)",
+              "description": "Additional notes or instructions for the order"
+            },
+            {
+              "column_name": "tags",
+              "data_type": "VARCHAR(255)",
+              "description": "Tags or labels associated with the order"
+            },
+            {
+              "column_name": "is_hyperlocal_eligible",
+              "data_type": "BOOLEAN",
+              "description": "Indicates if the order is eligible for hyperlocal delivery (default: FALSE)"
+            },
+            {
+              "column_name": "customer_lat",
+              "data_type": "VARCHAR(31)",
+              "description": "Latitude coordinate of customer's delivery location"
+            },
+            {
+              "column_name": "customer_long",
+              "data_type": "VARCHAR(31)",
+              "description": "Longitude coordinate of customer's delivery location"
+            },
+            {
+              "column_name": "customer_country",
+              "data_type": "VARCHAR(31)",
+              "description": "Country of the customer's delivery address"
+            }
+          ]
+        },
+        {
+          "table_name": "pickup_locations",
+          "description": "Stores information about warehouse and pickup locations",
+          "columns": [
+            {
+              "column_name": "warehouse_id",
+              "data_type": "uuid",
+              "description": "Primary key, unique identifier for warehouse"
+            },
+            {
+              "column_name": "user_id",
+              "data_type": "uuid",
+              "description": "User identifier who owns or manages the warehouse"
+            },
+            {
+              "column_name": "warehouse_name",
+              "data_type": "VARCHAR(255)",
+              "description": "Name of the warehouse or pickup location"
+            },
+            {
+              "column_name": "warehouse_manager_name",
+              "data_type": "VARCHAR(255)",
+              "description": "Name of the warehouse manager"
+            },
+            {
+              "column_name": "email",
+              "data_type": "VARCHAR(255)",
+              "description": "Email address for the warehouse"
+            },
+            {
+              "column_name": "phone",
+              "data_type": "VARCHAR(31)",
+              "description": "Phone number for the warehouse"
+            },
+            {
+              "column_name": "address_line_1",
+              "data_type": "VARCHAR(1023)",
+              "description": "First line of warehouse address"
+            },
+            {
+              "column_name": "address_line_2",
+              "data_type": "VARCHAR(1023)",
+              "description": "Second line of warehouse address"
+            },
+            {
+              "column_name": "city_name",
+              "data_type": "VARCHAR(255)",
+              "description": "City where the warehouse is located"
+            },
+            {
+              "column_name": "state_name",
+              "data_type": "VARCHAR(255)",
+              "description": "State where the warehouse is located"
+            },
+            {
+              "column_name": "country_name",
+              "data_type": "VARCHAR(255)",
+              "description": "Country where the warehouse is located"
+            },
+            {
+              "column_name": "pincode",
+              "data_type": "VARCHAR(31)",
+              "description": "Postal code of the warehouse"
+            },
+            {
+              "column_name": "lat",
+              "data_type": "VARCHAR(63)",
+              "description": "Latitude coordinate of warehouse location"
+            },
+            {
+              "column_name": "long",
+              "data_type": "VARCHAR(63)",
+              "description": "Longitude coordinate of warehouse location"
+            },
+            {
+              "column_name": "special_id",
+              "data_type": "VARCHAR(255)",
+              "description": "Special identifier for the warehouse"
+            },
+            {
+              "column_name": "is_return",
+              "data_type": "BOOLEAN",
+              "description": "Indicates if this location is used for returns (default: FALSE)"
+            },
+            {
+              "column_name": "is_deleted",
+              "data_type": "BOOLEAN",
+              "description": "Soft delete flag indicating if warehouse is deleted (default: FALSE)"
+            }
+          ]
+        },
+        {
+          "table_name": "ndr_orders",
+          "description": "Stores Non-Delivery Report (NDR) information for orders that could not be delivered",
+          "columns": [
+            {
+              "column_name": "ndr_id",
+              "data_type": "uuid",
+              "description": "Primary key, unique identifier for NDR record"
+            },
+            {
+              "column_name": "track_id",
+              "data_type": "uuid",
+              "description": "Tracking identifier, links to tracking_orders table"
+            },
+            {
+              "column_name": "ndr_history",
+              "data_type": "JSONB",
+              "description": "JSON array containing history of NDR events"
+            },
+            {
+              "column_name": "current_ndr_status",
+              "data_type": "VARCHAR(31)",
+              "description": "Current status of the NDR"
+            },
+            {
+              "column_name": "current_ndr_attempt",
+              "data_type": "VARCHAR(15)",
+              "description": "Current delivery attempt number for NDR"
+            },
+            {
+              "column_name": "current_ndr_reason",
+              "data_type": "VARCHAR(255)",
+              "description": "Reason for the non-delivery"
+            },
+            {
+              "column_name": "action_status",
+              "data_type": "VARCHAR(31)",
+              "description": "Status of action taken on the NDR"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
