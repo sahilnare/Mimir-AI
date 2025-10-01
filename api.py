@@ -118,85 +118,56 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
-async def stream_response(query: str, config: dict) -> AsyncGenerator[str, None]:
-    """Stream the agent response"""
+async def stream_response(query: str, thread_id: str) -> AsyncGenerator[str, None]:
+    """Stream the agent response in real-time from LLM (plain text, no SSE)."""
     try:
-        for event in sql_agent.stream_response(query, config):
-            async for event in sql_agent.stream_response(query, config):
-                # Extract meaningful content from the event
-                if event.get("messages"):
-                    last_message = event["messages"][-1]
-                    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                        for tool_call in last_message.tool_calls:
-                            if tool_call["name"] == "SubmitFinalAnswer":
-                                args = tool_call["args"]
-                                if isinstance(args, str):
-                                    args = json.loads(args)
-                                yield f"data: {args['final_answer']}\n\n"
-                                return
-                    elif hasattr(last_message, 'content') and last_message.content:
-                        yield f"data: {last_message.content}\n\n"
-                await asyncio.sleep(0.1)
+        async for chunk in sql_agent.stream_response(query, thread_id=thread_id):
+            if chunk:
+                yield chunk
     except Exception as e:
-        yield f"data: Error: {str(e)}\n\n"
-    finally:
-        yield "data: [DONE]\n\n"
+        logger.error(f"Error in stream_response: {e}")
+        yield f"[Error] {str(e)}"
 
-@app.exception_handler(RateLimitExceeded)
-async def rate_limited_handler(request: Request, exc: RateLimitExceeded):
-    retry_after = getattr(exc, 'retry_after', 60)
-    return JSONResponse(
-        content={
-            "detail": "Rate Limit Exceeded. Please try again later.",
-            "retry_after_seconds": retry_after
-        }, 
-        status_code=429, 
-        headers={"Retry-After": str(retry_after)}
-    )
 
 @app.post("/ai/chat", tags=["AI"])
 @limiter.limit("5/minute")
 async def chat(request: Request, query_request: QueryRequest):
     """
-    Execute a query against the database and return AI-generated response
+    Execute a query against the database and return AI-generated response.
     """
-    try:
-        if not sql_agent:
-            raise HTTPException(status_code=500, detail="SQL Agent not initialized")
-        
-        # Handle greetings for very short queries
-        if len(query_request.query) <= 3:
-            greetings = ["hello", "hi", "hey", "greetings", "wassup", "what's up", "howdy"]
-            if any(greeting in query_request.query.lower() for greeting in greetings):
-                return QueryResponse(result="Hello! How can I help you with your data queries today?")
-        
-        if not query_request.query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        # Build context for the query
-        context_prefix = f'user id {query_request.user_id}'
-        if query_request.is_customer:
-            context_prefix = f'order id {query_request.user_id}'
-        
-        full_query = f"For this {context_prefix} answer the following question: {query_request.query}"
-        
-        # Generate unique config for this request
-        config = {"configurable": {"thread_id": f"thread_{query_request.user_id}_{id(request)}"}}
-        
-        if query_request.stream:
-            return StreamingResponse(
-                stream_response(full_query, config), 
-                media_type="text/event-stream"
-            )
-        else:
-            result = await sql_agent.get_response(full_query, config)
-            return QueryResponse(result=result)
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+
+    if not query_request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    # Handle greetings for very short queries
+    if len(query_request.query) <= 3:
+        greetings = ["hello", "hi", "hey", "greetings", "wassup", "what's up", "howdy"]
+        if any(greeting in query_request.query.lower() for greeting in greetings):
+            greeting_response = "Hello! How can I help you with your data queries today?"
             
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing query: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+            if query_request.stream:
+                async def stream_greeting():
+                    for word in greeting_response.split():
+                        yield word + " "
+                        await asyncio.sleep(0.05)
+                return StreamingResponse(stream_greeting(), media_type="text/plain")
+            else:
+                return QueryResponse(result=greeting_response)
+
+    # Generate thread_id for this user
+    thread_id = f"user_{query_request.user_id}"
+
+    if query_request.stream:
+        return StreamingResponse(
+            stream_response(query_request.query, thread_id),
+            media_type="text/plain"
+        )
+    else:
+        result = await sql_agent.get_response(query_request.query, thread_id=thread_id)
+        return QueryResponse(result=result)
+
 
 @app.get("/ai/health")
 @limiter.exempt
