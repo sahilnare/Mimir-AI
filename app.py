@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 from typing import Generator
+from datetime import datetime
 
 API_BASE_URL = "http://localhost:5000/ai"
 
@@ -19,6 +20,10 @@ if "user_id" not in st.session_state:
 if "is_customer" not in st.session_state:
     st.session_state.is_customer = False
 
+def get_thread_id() -> str:
+    """Generate thread ID based on user type."""
+    return f"user_{st.session_state.user_id}"
+
 def stream_chat_response(query: str, user_id: str, is_customer: bool) -> Generator[str, None, None]:
     """Stream plain text response from the API (no SSE)."""
     try:
@@ -27,9 +32,8 @@ def stream_chat_response(query: str, user_id: str, is_customer: bool) -> Generat
             json={
                 "query": query,
                 "user_id": user_id,
-                "is_customer": is_customer,
-                "stream": True
-            },
+                "is_customer": is_customer            
+                },
             stream=True,
             timeout=100
         )
@@ -43,6 +47,66 @@ def stream_chat_response(query: str, user_id: str, is_customer: bool) -> Generat
 
     except requests.exceptions.RequestException as e:
         yield f"Error connecting to API: {str(e)}"
+
+
+def check_data_available() -> tuple[bool, int]:
+    """Check if data is available for download."""
+    try:
+        thread_id = get_thread_id()
+        response = requests.get(
+            f"{API_BASE_URL}/chat/{thread_id}/check",
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("has_data", False), data.get("row_count", 0)
+        
+        return False, 0
+            
+    except requests.exceptions.RequestException:
+        return False, 0
+
+
+def download_excel() -> tuple[bytes, str]:
+    """Download Excel file for current thread."""
+    try:
+        thread_id = get_thread_id()
+        
+        response = requests.get(
+            f"{API_BASE_URL}/chat/{thread_id}/download",
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"query_results_{timestamp}.xlsx"
+            return response.content, filename
+        
+        return None, None
+            
+    except requests.exceptions.RequestException as e:
+        st.error(f"Download error: {str(e)}")
+        return None, None
+
+
+def download_chart() -> bytes:
+    """Download chart image for current thread."""
+    try:
+        thread_id = get_thread_id()
+        
+        response = requests.get(
+            f"{API_BASE_URL}/chat/{thread_id}/download/chart",
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.content
+        
+        return None
+            
+    except requests.exceptions.RequestException:
+        return None
 
 
 def add_question_pair(question: str, sql_query: str, db_name: str) -> dict:
@@ -126,17 +190,37 @@ with st.sidebar:
         st.rerun()
 
 
-st.title("🤖 SQL Agent Chat")
+st.title("AI SQL Agent")
 st.caption("Ask questions about your data in natural language")
 
 # Show current context
 context_type = "Order ID" if st.session_state.is_customer else "User ID"
 st.info(f"**Current Context:** {context_type} = `{st.session_state.user_id}`")
 
-# Show chat history
-for message in st.session_state.messages:
+# Show chat history with stored charts and download buttons
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        
+        # Show chart if this message has chart data
+        if message["role"] == "assistant" and message.get("chart_data"):
+            st.image(message["chart_data"])
+        
+        # Show download button if this message has Excel data
+        if message["role"] == "assistant" and message.get("has_data"):
+            st.write("For inspecting the full data, please download the excel file below")
+            
+            excel_data = message.get("excel_data")
+            filename = message.get("filename")
+            
+            if excel_data and filename:
+                st.download_button(
+                    label=f"📥 Download Excel",
+                    data=excel_data,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_{idx}",
+                )
 
 # Chat input
 if prompt := st.chat_input("Ask a question about your data..."):
@@ -161,8 +245,45 @@ if prompt := st.chat_input("Ask a question about your data..."):
 
         message_placeholder.markdown(full_response)
 
-    # Save assistant message
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+        # Prepare assistant message
+        assistant_message = {
+            "role": "assistant",
+            "content": full_response,
+            "has_data": False,
+            "chart_data": None
+        }
+        
+        # Download and store chart if available
+        chart_data = download_chart()
+        if chart_data:
+            assistant_message["chart_data"] = chart_data
+            st.image(chart_data)
+        
+        # Check if Excel data is available
+        has_data, row_count = check_data_available()
+        
+        if has_data and row_count > 0:
+            excel_data, filename = download_excel()
+            
+            if excel_data and filename:
+                # Store excel data in the message
+                assistant_message["has_data"] = True
+                assistant_message["excel_data"] = excel_data
+                assistant_message["filename"] = filename
+                assistant_message["row_count"] = row_count
+                
+                # Show download button immediately
+                st.write("For inspecting the full data, please download the excel file below")
+                st.download_button(
+                    label=f"📥 Download Excel",
+                    data=excel_data,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_latest",
+                )
+
+        # Save assistant message with all data
+        st.session_state.messages.append(assistant_message)
 
 
 st.divider()

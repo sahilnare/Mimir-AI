@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-import os
+import base64
 import asyncio
 import json
 import logging
@@ -7,7 +7,9 @@ from typing import AsyncGenerator, Optional
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from io import BytesIO
+import pandas as pd
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -39,7 +41,6 @@ class QueryRequest(BaseModel):
     query: str
     user_id: str = "f17d6407-9d6b-45f5-854c-30a43b4b9615"
     is_customer: bool = False
-    stream: bool = False
 
 class QueryResponse(BaseModel):
     result: str
@@ -119,7 +120,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 async def stream_response(query: str, thread_id: str) -> AsyncGenerator[str, None]:
-    """Stream the agent response in real-time from LLM (plain text, no SSE)."""
+    """Stream the agent response in real-time from LLM"""
     try:
         async for chunk in sql_agent.stream_response(query, thread_id=thread_id):
             if chunk:
@@ -134,6 +135,7 @@ async def stream_response(query: str, thread_id: str) -> AsyncGenerator[str, Non
 async def chat(request: Request, query_request: QueryRequest):
     """
     Execute a query against the database and return AI-generated response.
+    Supports streaming text and chart visualization.
     """
     if not sql_agent:
         raise HTTPException(status_code=500, detail="SQL Agent not initialized")
@@ -146,28 +148,131 @@ async def chat(request: Request, query_request: QueryRequest):
         greetings = ["hello", "hi", "hey", "greetings", "wassup", "what's up", "howdy"]
         if any(greeting in query_request.query.lower() for greeting in greetings):
             greeting_response = "Hello! How can I help you with your data queries today?"
-            
-            if query_request.stream:
-                async def stream_greeting():
-                    for word in greeting_response.split():
-                        yield word + " "
-                        await asyncio.sleep(0.05)
-                return StreamingResponse(stream_greeting(), media_type="text/plain")
-            else:
-                return QueryResponse(result=greeting_response)
-
+            async def stream_greeting():
+                for word in greeting_response.split():
+                    yield word + " "
+                    await asyncio.sleep(0.05)
+            return StreamingResponse(stream_greeting(), media_type="text/plain")
+    
     # Generate thread_id for this user
     thread_id = f"user_{query_request.user_id}"
-
-    if query_request.stream:
-        return StreamingResponse(
+    return StreamingResponse(
             stream_response(query_request.query, thread_id),
             media_type="text/plain"
         )
-    else:
-        result = await sql_agent.get_response(query_request.query, thread_id=thread_id)
-        return QueryResponse(result=result)
+ 
+@app.get("/ai/chat/{thread_id}/check/excel", tags=["AI"])
+async def check_query_results(thread_id: str):
+    """
+    Check if query results are available for download.
+    Returns: {"has_data": bool, "row_count": int}
+    """
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+    
+    df = sql_agent.get_last_dataframe(thread_id)
+    has_data = df is not None and not df.empty
+    row_count = len(df) if has_data else 0
+    
+    return {
+        "has_data": has_data,
+        "row_count": row_count
+    }
 
+@app.get("/ai/chat/{thread_id}/download/excel", tags=["AI"])
+async def download_query_results(thread_id: str):
+    """
+    Download Excel file for the last query results in this conversation thread.
+    """
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+    
+    # Get the DataFrame from the conversation
+    df = sql_agent.get_last_dataframe(thread_id)
+    
+    if df is None or df.empty:
+        raise HTTPException(
+            status_code=404, 
+            detail="No query results available for this conversation"
+        )
+    
+    # Convert DataFrame to Excel
+    output = BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Query Results')
+        
+        output.seek(0)
+        
+        # Generate filename
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"query_results_{thread_id}_{timestamp}.xlsx"
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating Excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate Excel: {str(e)}")
+
+@app.get("/ai/chat/{thread_id}/check/chart", tags=["AI"])
+async def check_chart_data(thread_id: str):
+    """
+    Check if query results are available for download.
+    Returns: {"has_data": bool, "row_count": int}
+    """
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+    
+    data = sql_agent.get_last_chart_data(thread_id)
+    has_data = data is not None
+  
+    return {
+        "has_data": has_data
+    }
+
+@app.get("/ai/chat/{thread_id}/download/chart", tags=["AI"])
+async def download_chart(thread_id: str):
+    """
+    Return the chart as a PNG image for the given thread_id.
+    """
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+    
+    chart_base64 = sql_agent.get_last_chart_data(thread_id)
+    if not chart_base64:
+        raise HTTPException(status_code=404, detail="No chart found for this thread")
+    
+    # Remove the data:image/png;base64, prefix if present
+    if chart_base64.startswith("data:image/png;base64,"):
+        chart_base64 = chart_base64.split(",", 1)[1]
+    
+    chart_bytes = base64.b64decode(chart_base64)
+    
+    return Response(content=chart_bytes, media_type="image/png")
+
+@app.delete("/ai/chat/{thread_id}", tags=["AI"])
+async def clear_conversation(thread_id: str):
+    """
+    Clear conversation history and cached results for a thread.
+    """
+    if not sql_agent:
+        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
+    
+    try:
+        sql_agent.clear_conversation(thread_id)
+        return {"status": "success", "message": f"Conversation {thread_id} cleared"}
+    except Exception as e:
+        logger.error(f"Error clearing conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 @app.get("/ai/health")
 @limiter.exempt
