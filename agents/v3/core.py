@@ -7,15 +7,26 @@ import pandas as pd
 from pandas import DataFrame
 import matplotlib.pyplot as plt
 from io import BytesIO
-from typing import Dict, List, Any, AsyncGenerator, Optional, Tuple
+from typing import Dict, List, Any, AsyncGenerator, Optional, Tuple, Literal
 from dataclasses import dataclass, field
 from sqlalchemy import text
+from enum import Enum
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities import SQLDatabase
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
 from agents.v3.vector_store import VectorStoreManager
+
+
+class QueryIntent(str, Enum):
+    """Query intent types"""
+    GENERAL_KNOWLEDGE = "general_knowledge"  # General questions, greetings, how-tos
+    DATA_QUERY = "data_query"  # Needs SQL execution
+    RECOMMENDATION = "recommendation"  # Strategic advice based on data analysis
+    AMBIGUOUS = "ambiguous"  # Unclear intent
 
 
 @dataclass
@@ -24,12 +35,13 @@ class ConversationState:
     similar_questions: List[Dict] = field(default_factory=list)
     relevant_tables: List[str] = field(default_factory=list)
     schema_docs: Dict[str, Any] = field(default_factory=dict)
-    is_sql_query: bool = False
+    query_intent: Optional[QueryIntent] = None
     query_result: Optional[str] = None
     full_dataframe: Optional[pd.DataFrame] = None
     last_sql_query: Optional[str] = None
     needs_chart: bool = False
     chart_data: Optional[Dict] = None
+    kpi_results: Dict[str, Any] = field(default_factory=dict)
 
 
 class SQLAgent:
@@ -45,7 +57,7 @@ class SQLAgent:
         
         # Initialize LLMs
         self.query_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-pro",
             api_key=self.api_key,
             temperature=0.4,
             streaming=False
@@ -65,6 +77,7 @@ class SQLAgent:
             streaming=False,
             max_output_tokens=1024
         )
+        
         self.config_llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash-lite",
             api_key=self.api_key,
@@ -72,10 +85,18 @@ class SQLAgent:
             streaming=False,
             max_output_tokens=1024
         )
-
+        
+        self.intent_llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite",
+            api_key=self.api_key,
+            temperature=0.1,
+            streaming=False,
+            max_output_tokens=512
+        )
         
         # Conversation history
         self.conversations: Dict[str, ConversationState] = {}
+        self.current_user_id = None
     
     def _load_schema_docs(self, path: str) -> Dict[str, str]:
         try:
@@ -101,10 +122,10 @@ class SQLAgent:
         return (
             user_id in query 
             and not any(re.search(pattern, query, re.IGNORECASE) for pattern in danger_patterns)
-        )    
+        )
     
     def _execute_query(self, query: str, user_id: str) -> Tuple[str, Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """Execute SQL query and return preview string, full DataFrame, and preview DataFrame"""
+        """Execute SQL query and return preview string, preview DataFrame, and full DataFrame"""
         if not self._validate_query(query, user_id):
             return "Error: Query contains unsafe operations", None, None
 
@@ -116,7 +137,8 @@ class SQLAgent:
                 # Fetch ALL rows for DataFrame
                 all_rows = result_proxy.fetchall()
                 
-                print(all_rows)
+                print(f"Query returned {len(all_rows)} rows")
+                
                 # Create full DataFrame
                 full_df = None
                 if all_rows and len(all_rows) > 5:
@@ -124,11 +146,8 @@ class SQLAgent:
   
                 # Priority columns for preview
                 preferred_columns = [
-                    "order_id",
-                    "customer_city",
-                    "customer_state",
-                    "warehouse_name",
-                    "price_of_shipment"
+                    "order_id", "customer_city", "customer_state",
+                    "warehouse_name", "price_of_shipment", "current_order_status"
                 ]
                 
                 # Pick preferred columns if present, else fallback to first 10
@@ -143,7 +162,7 @@ class SQLAgent:
                 else:
                     preview_df = pd.DataFrame(columns=preview_columns)
                 
-                # Create preview string (first 5 rows only)
+                # Create preview string (first 10 rows only)
                 limited_rows = []
                 for row in preview_rows:
                     row_dict = dict(zip(all_columns, row))
@@ -168,21 +187,387 @@ class SQLAgent:
                 referenced_tables.append(table_name)
         return referenced_tables
     
-    def _detect_sql_intent(self, query: str) -> bool:
-        sql_keywords = [
-            'show', 'get', 'find', 'list', 'count', 'how many', 'total', 'shippment', 
-            'sum', 'average', 'recent', 'latest', 'orders', 'customers', 'rto',
-            'report', 'data', 'records', 'table', 'database', "delivery", "which"
-        ]
-        return any(keyword in query.lower() for keyword in sql_keywords)
+    async def _detect_query_intent(self, query: str) -> QueryIntent:
+        """Intelligently detect query intent using LLM"""
+        
+        intent_prompt = f"""Analyze the user's query and classify it into ONE of these categories:
+
+**Categories:**
+1. **general_knowledge**: Greetings, small talk, questions about how things work, definitions, explanations that don't need data
+   Examples: "Hi", "What is RTO?", "How does shipping work?", "Explain COD"
+
+2. **data_query**: Questions that require fetching data from database
+   Examples: "Show me orders from Mumbai", "How many RTO orders?", "List delivered shipments", "Which carrier has most delays?"
+
+3. **recommendation**: Questions asking for strategic advice, suggestions, or optimization strategies
+   Examples: "How to reduce RTO?", "What can I do to improve delivery rates?", "Suggest ways to optimize shipping costs", "How to handle NDR better?"
+
+4. **ambiguous**: Unclear or mixed intent
+
+**User Query:** "{query}"
+
+**Analysis Guidelines:**
+- If asking "reccommend me", "how to", "ways to", "suggestions", "what should I do" → likely **recommendation**
+- If asking "show", "list", "how many", "which", "get", "find" → likely **data_query**
+- If general conversation or asking definitions → **general_knowledge**
+- Recommendations often need data analysis FIRST, then strategic advice
+
+Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or ambiguous"""
+        
+        try:
+            response = await self.intent_llm.ainvoke([HumanMessage(content=intent_prompt)])
+            intent_str = response.content.strip().lower()
+            
+            # Map response to enum
+            if "general_knowledge" in intent_str:
+                return QueryIntent.GENERAL_KNOWLEDGE
+            elif "data_query" in intent_str:
+                return QueryIntent.DATA_QUERY
+            elif "recommendation" in intent_str:
+                return QueryIntent.RECOMMENDATION
+            else:
+                return QueryIntent.AMBIGUOUS
+                
+        except Exception as e:
+            print(f"Intent detection error: {e}")
+            return QueryIntent.AMBIGUOUS
+        
+    def _register_kpi_tools(self, user_id: str):
+        """Create KPI calculation tools with proper schema alignment"""
+
+        @tool
+        def calculate_rto_rate(days: int = 50) -> Dict[str, Any]:
+            """
+            Calculate RTO (Return to Origin) rate for the user's orders.
+            RTO statuses include: RTO, RTO IN TRANSIT, RTO DELIVERED, RTO OFD, RTO INITIATED, RTO NDR
+
+            Args:
+              days: int default: 50
+            """
+            print("calculate_rto_rate tool is called!")
+            query = f"""
+            SELECT 
+                COUNT(*) FILTER (
+                    WHERE t.current_order_status IN (
+                        'RTO', 'RTO IN TRANSIT', 'RTO DELIVERED', 
+                        'RTO OFD', 'RTO INITIATED', 'RTO NDR'
+                    )
+                ) as rto_count,
+                COUNT(*) as total_orders,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (
+                        WHERE t.current_order_status IN (
+                            'RTO', 'RTO IN TRANSIT', 'RTO DELIVERED', 
+                            'RTO OFD', 'RTO INITIATED', 'RTO NDR'
+                        )
+                    ) / NULLIF(COUNT(*), 0), 
+                    2
+                ) as rto_rate
+            FROM orders o
+            INNER JOIN tracking_orders t ON o.order_id = t.order_id
+            WHERE o.user_id = '{user_id}'
+                AND t.current_order_status != 'CANCELLED'
+                AND t.ordered_date IS NOT NULL
+                AND t.ordered_date >= CURRENT_DATE - INTERVAL '{days} days'
+            """
+            preview, preview_df, full_df = self._execute_query(query, user_id)
+            
+            if preview.startswith("Error:"):
+                return {"error": preview}
+            
+            if preview_df is not None and len(preview_df) > 0:
+                row = preview_df.iloc[0]
+                rto_rate = row['rto_rate']
+                if pd.isna(rto_rate) or rto_rate is None:
+                    rto_rate = 0.0
+                
+                return {
+                    "rto_count": int(row['rto_count']) if not pd.isna(row['rto_count']) else 0,
+                    "total_orders": int(row['total_orders']) if not pd.isna(row['total_orders']) else 0,
+                    "rto_rate": float(rto_rate),
+                    "period_days": days
+                }
+            return {"error": "No data found"}
+
+        @tool
+        def get_delivery_performance(days: int = 50) -> Dict[str, Any]:
+            """
+            Get delivery performance metrics.
+            Excludes CANCELLED orders from calculations.
+
+            Args:
+              days: int default: 50
+            """
+            print("get_delivery_performance tool is called!")
+            query = f"""
+            SELECT 
+                COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') as delivered_count,
+                COUNT(*) FILTER (WHERE t.current_order_status IN ('IN TRANSIT', 'OUT FOR DELIVERY')) as in_transit_count,
+                COUNT(*) FILTER (WHERE t.current_order_status = 'UNDELIVERED') as undelivered_count,
+                COUNT(*) FILTER (WHERE t.current_order_status = 'DELAYED') as delayed_count,
+                COUNT(*) FILTER (WHERE t.sla_breach = TRUE) as sla_breach_count,
+                COUNT(*) as total_orders,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') / NULLIF(COUNT(*), 0), 
+                    2
+                ) as delivery_rate,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE t.sla_breach = TRUE) / NULLIF(COUNT(*), 0), 
+                    2
+                ) as sla_breach_rate
+            FROM orders o
+            INNER JOIN tracking_orders t ON o.order_id = t.order_id
+            WHERE o.user_id = '{user_id}'
+                AND t.current_order_status != 'CANCELLED'
+                AND t.ordered_date IS NOT NULL
+                AND t.ordered_date >= CURRENT_DATE - INTERVAL '{days} days'
+            """
+            preview, preview_df, full_df = self._execute_query(query, user_id)
+            
+            if preview.startswith("Error:"):
+                return {"error": preview}
+            
+            if preview_df is not None and len(preview_df) > 0:
+                row = preview_df.iloc[0]
+                delivery_rate = row['delivery_rate']
+                sla_breach_rate = row['sla_breach_rate']
+                if pd.isna(delivery_rate) or delivery_rate is None:
+                    delivery_rate = 0.0
+                if pd.isna(sla_breach_rate) or sla_breach_rate is None:
+                    sla_breach_rate = 0.0
+                    
+                return {
+                    "delivered_count": int(row['delivered_count']) if not pd.isna(row['delivered_count']) else 0,
+                    "in_transit_count": int(row['in_transit_count']) if not pd.isna(row['in_transit_count']) else 0,
+                    "undelivered_count": int(row['undelivered_count']) if not pd.isna(row['undelivered_count']) else 0,
+                    "delayed_count": int(row['delayed_count']) if not pd.isna(row['delayed_count']) else 0,
+                    "sla_breach_count": int(row['sla_breach_count']) if not pd.isna(row['sla_breach_count']) else 0,
+                    "total_orders": int(row['total_orders']) if not pd.isna(row['total_orders']) else 0,
+                    "delivery_rate": float(delivery_rate),
+                    "sla_breach_rate": float(sla_breach_rate),
+                    "period_days": days
+                }
+            return {"error": "No data found"}
+
+        @tool
+        def analyze_ndr_reasons(days: int = 50, limit: int = 10) -> Dict[str, Any]:
+            """
+            Analyze top reasons for Non-Delivery Reports (NDR).
+            Only includes orders that actually have NDR records.
+
+            Args:
+              days: int default: 50
+              limit: int default: 10
+            """
+            print("analyze_ndr_reasons tool is called!")
+            query = f"""
+            SELECT 
+                n.current_ndr_reason,
+                COUNT(*) as ndr_count,
+                COUNT(DISTINCT n.track_id) as affected_shipments
+            FROM orders o
+            INNER JOIN tracking_orders t ON o.order_id = t.order_id
+            INNER JOIN ndr_orders n ON t.track_id = n.track_id
+            WHERE o.user_id = '{user_id}'
+                AND t.ordered_date IS NOT NULL
+                AND t.ordered_date >= CURRENT_DATE - INTERVAL '{days} days'
+                AND n.current_ndr_reason IS NOT NULL
+                AND n.current_ndr_reason != ''
+            GROUP BY n.current_ndr_reason
+            ORDER BY ndr_count DESC
+            LIMIT {limit}
+            """
+            preview, preview_df, full_df = self._execute_query(query, user_id)
+            
+            if preview.startswith("Error:"):
+                return {"error": preview}
+            
+            if preview_df is not None and len(preview_df) > 0:
+                reasons = []
+                for _, row in preview_df.iterrows():
+                    reasons.append({
+                        "reason": row['current_ndr_reason'],
+                        "count": int(row['ndr_count']),
+                        "affected_shipments": int(row['affected_shipments'])
+                    })
+                return {
+                    "top_ndr_reasons": reasons,
+                    "total_ndr_types": len(reasons),
+                    "period_days": days
+                }
+            return {"error": "No NDR data found"}
+
+        @tool
+        def compare_carrier_performance(days: int = 50) -> Dict[str, Any]:
+            """
+            Compare performance across different carriers.
+            Excludes CANCELLED orders and includes SLA breach metrics.
+
+            Args:
+              days: int default: 50
+            """
+            print("compare_carrier_performance tool is called!")
+            query = f"""
+            SELECT 
+                t.carrier_name,
+                COUNT(*) as total_shipments,
+                COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') as delivered,
+                COUNT(*) FILTER (
+                    WHERE t.current_order_status IN (
+                        'RTO', 'RTO IN TRANSIT', 'RTO DELIVERED', 
+                        'RTO OFD', 'RTO INITIATED', 'RTO NDR'
+                    )
+                ) as rto,
+                COUNT(*) FILTER (WHERE t.current_order_status = 'UNDELIVERED') as undelivered,
+                COUNT(*) FILTER (WHERE t.sla_breach = TRUE) as sla_breaches,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') / NULLIF(COUNT(*), 0), 
+                    2
+                ) as delivery_rate,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (
+                        WHERE t.current_order_status IN (
+                            'RTO', 'RTO IN TRANSIT', 'RTO DELIVERED', 
+                            'RTO OFD', 'RTO INITIATED', 'RTO NDR'
+                        )
+                    ) / NULLIF(COUNT(*), 0), 
+                    2
+                ) as rto_rate,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE t.sla_breach = TRUE) / NULLIF(COUNT(*), 0), 
+                    2
+                ) as sla_breach_rate
+            FROM orders o
+            INNER JOIN tracking_orders t ON o.order_id = t.order_id
+            WHERE o.user_id = '{user_id}'
+                AND t.current_order_status != 'CANCELLED'
+                AND t.ordered_date IS NOT NULL
+                AND t.ordered_date >= CURRENT_DATE - INTERVAL '{days} days'
+                AND t.carrier_name IS NOT NULL
+            GROUP BY t.carrier_name
+            HAVING COUNT(*) > 0
+            ORDER BY total_shipments DESC
+            LIMIT 10
+            """
+            preview, preview_df, _ = self._execute_query(query, user_id)
+            
+            if preview.startswith("Error:"):
+                return {"error": preview}
+            
+            if preview_df is not None and len(preview_df) > 0:
+                carriers = []
+                for _, row in preview_df.iterrows():
+                    delivery_rate = row['delivery_rate']
+                    rto_rate = row['rto_rate']
+                    sla_breach_rate = row['sla_breach_rate']
+                    if pd.isna(delivery_rate): delivery_rate = 0.0
+                    if pd.isna(rto_rate): rto_rate = 0.0
+                    if pd.isna(sla_breach_rate): sla_breach_rate = 0.0
+                    
+                    carriers.append({
+                        "carrier_name": row['carrier_name'],
+                        "total_shipments": int(row['total_shipments']),
+                        "delivered": int(row['delivered']),
+                        "rto": int(row['rto']),
+                        "undelivered": int(row['undelivered']),
+                        "sla_breaches": int(row['sla_breaches']),
+                        "delivery_rate": float(delivery_rate),
+                        "rto_rate": float(rto_rate),
+                        "sla_breach_rate": float(sla_breach_rate)
+                    })
+                return {
+                    "carriers": carriers,
+                    "period_days": days
+                }
+            return {"error": "No carrier data found"}
+        
+        @tool
+        def analyze_order_types_and_modes(days: int = 50) -> Dict[str, Any]:
+            """
+            Analyze order distribution by payment type (COD vs PREPAID) and shipping mode (SURFACE vs EXPRESS).
+            Uses order_details table for accurate payment and shipping information.
+
+            Args:
+               days: int default: 50
+            """
+            print("analyze_order_types_and_modes tool is called!")
+            query = f"""
+            SELECT 
+                od.order_type,
+                od.order_mode,
+                COUNT(*) as order_count,
+                COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') as delivered_count,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE t.current_order_status = 'DELIVERED') / NULLIF(COUNT(*), 0), 
+                    2
+                ) as delivery_rate
+            FROM orders o
+            INNER JOIN tracking_orders t ON o.order_id = t.order_id
+            INNER JOIN order_details od ON o.order_id = od.order_id
+            WHERE o.user_id = '{user_id}'
+                AND t.current_order_status != 'CANCELLED'
+                AND t.ordered_date IS NOT NULL
+                AND t.ordered_date >= CURRENT_DATE - INTERVAL '{days} days'
+            GROUP BY od.order_type, od.order_mode
+            ORDER BY order_count DESC
+            """
+            preview, preview_df, _ = self._execute_query(query, user_id)
+            
+            if preview.startswith("Error:"):
+                return {"error": preview}
+            
+            if preview_df is not None and len(preview_df) > 0:
+                segments = []
+                for _, row in preview_df.iterrows():
+                    delivery_rate = row['delivery_rate']
+                    if pd.isna(delivery_rate): delivery_rate = 0.0
+                    
+                    segments.append({
+                        "order_type": row['order_type'],
+                        "order_mode": row['order_mode'],
+                        "order_count": int(row['order_count']),
+                        "delivered_count": int(row['delivered_count']),
+                        "delivery_rate": float(delivery_rate)
+                    })
+                return {
+                    "segments": segments,
+                    "period_days": days
+                }
+            return {"error": "No order type data found"}
+        
+        @tool
+        def execute_custom_query(sql_query: str) -> str:
+            """
+            Execute a custom SQL query when no predefined KPI tool fits the user's question.
+            
+            CRITICAL: The SQL query MUST include a WHERE clause filtering by user_id.
+            Example: WHERE o.user_id = '{user_id}' or WHERE orders.user_id = '{user_id}'
+            
+            Args:
+                sql_query: The SQL query to execute (MUST include user_id filter for security)
+            
+            Returns:
+                String with query results or error if user_id filter is missing
+            """
+            print("execute_custom_query tool is called!")
+            # Validate that user_id is in the query
+            if user_id not in sql_query:
+                return f"Error: SQL query must include user_id filter (user_id = '{user_id}'). Please regenerate the query with proper filtering."
+            
+            preview, _, _ = self._execute_query(sql_query, user_id)
+            return preview
+            
+        return [
+                calculate_rto_rate,
+                get_delivery_performance,
+                analyze_ndr_reasons,
+                compare_carrier_performance,
+                analyze_order_types_and_modes,
+                execute_custom_query
+            ]
     
     async def _search_similar(self, state: ConversationState, query: str):
-        """Step 1: Search for similar questions"""
-        state.is_sql_query = self._detect_sql_intent(query)
-        
-        if not state.is_sql_query:
-            return
-        
+        """Search for similar questions in vector store"""
         print(f"Searching similar questions for: {query}")
         state.similar_questions = await self.vectorstore.search_similar_questions(
             query, 
@@ -199,10 +584,7 @@ class SQLAgent:
         print(f"Relevant tables: {state.relevant_tables}")
     
     def _get_schema_context(self, state: ConversationState) -> str:
-        """Step 2: Build schema context"""
-        if not state.is_sql_query:
-            return ""
-        
+        """Build schema context"""
         # Get relevant schema docs
         for db in self.schema_docs.get('databases', []):
             if db.get('database_name') == self.db_name:
@@ -228,23 +610,22 @@ class SQLAgent:
         
         return schema_context
     
-    def _get_similar_context(self, state: ConversationState) -> str:
-        """Build similar questions context"""
-        if not state.similar_questions:
-            return ""
+    async def _handle_data_query(
+        self, 
+        query: str, 
+        user_id: str,
+        state: ConversationState
+    ) -> Tuple[Optional[str], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        """Generate SQL and execute directly without agent framework"""
         
-        similar_context = "\nSimilar Questions and Queries for Reference:\n"
-        for i, q in enumerate(state.similar_questions[:3], 1):
-            similar_context += f"{i}. Question: {q['question']}\n   SQL: {q['sql_query']}\n\n"
-        
-        return similar_context
-    
-    async def _generate_sql(self, state: ConversationState, query: str, user_id: str) -> Optional[str]:
-        """Step 3: Generate SQL query"""
         schema_context = self._get_schema_context(state)
-        similar_context = self._get_similar_context(state)
+        similar_context = ""
+        if state.similar_questions:
+            similar_context = "\nSimilar Questions for Reference:\n"
+            for i, q in enumerate(state.similar_questions[:3], 1):
+                similar_context += f"{i}. Q: {q['question']}\n   SQL: {q['sql_query']}\n\n"
         
-        system_prompt = f"""You are a SQL expert. Generate a syntactically correct PostgreSQL query.
+        sql_prompt = f"""You are a SQL expert. Generate a syntactically correct PostgreSQL query.
 
 {schema_context}
 
@@ -258,39 +639,115 @@ Guidelines:
 - Use ORDER BY for meaningful ordering
 - Use LIKE for status matching (e.g., 'RTO%')
 - NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
+- If the question asks for "comparison", "analysis", "breakdown", "distribution", or "categorisation", use GROUP BY with aggregations
+- Common aggregation patterns:
+  * Counts: COUNT(*), COUNT(DISTINCT column)
+  * Percentages: ROUND(100.0 * COUNT(*) FILTER (WHERE condition) / NULLIF(COUNT(*), 0), 2)
+  * Sums/Averages: SUM(column), AVG(column)
 - Always add LIMIT 60 to your queries
 
 Output ONLY the SQL query, nothing else."""
         
-        system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{query}")
-        ])
+        try:
+            response = await self.query_llm.ainvoke([HumanMessage(content=sql_prompt)])
+            sql_query = response.content.strip()
+            
+            # Clean SQL
+            sql_query = re.sub(r'```sql\s*|\s*```', '', sql_query).strip()
+
+            print(f"Gnerated Query: {sql_query}")
+            
+            # Execute
+            preview, preview_df, full_df = self._execute_query(sql_query, user_id)
+            
+            return preview, preview_df, full_df
+            
+        except Exception as e:
+            print(f"Data query error: {e}")
+            return f"Error: Could not process query - {str(e)}", None, None
         
-        chain = prompt | self.query_llm
-        response = await chain.ainvoke({"query": query})
-        # Extract SQL from response
-        sql_query = response.content.strip()
-        # Remove markdown code blocks if present
-        sql_query = re.sub(r'```sql\s*|\s*```', '', sql_query).strip()
+    async def _handle_recommendation_query(
+        self, query: str, user_id: str, state: ConversationState
+    ) -> Tuple[Optional[str], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        """Use LangGraph agent with tools to handle data queries"""
+        # Create tools
+        tools = self._register_kpi_tools(user_id)
         
-        print(f"Generated SQL: {sql_query}")
-        return sql_query
+        # Create agent
+        agent = create_react_agent(self.query_llm, tools)
+        
+        schema_context = self._get_schema_context(state)
+        
+        # Agent prompt
+        agent_prompt = f"""You are a data analyst assistant with access to tools for calculating KPIs and executing SQL queries.
+
+    User Question: {query}
+
+    {schema_context}
+
+    **CRITICAL SECURITY RULES:**
+    1. ALWAYS filter by user_id = '{user_id}' in ALL SQL queries
+    2. When using execute_custom_query tool, the SQL MUST be a POSTGRES SQL and include: WHERE o.user_id = '{user_id}' or WHERE orders.user_id = '{user_id}'
+
+    **AVAILABLE TOOLS**
+    - For RTO reduction questions: calculate_rto_rate, analyze_ndr_reasons
+    - For delivery improvements: get_delivery_performance, compare_carrier_performance
+    - If you need custom data not covered by predefined tools: use execute_custom_query tool and input a valid POSTGRES Valid SQL
+
+    **Instructions:**
+    1. Analyze the question and decide which tool(s) to use
+    2. If there's a specific KPI tool that fits, use it (e.g., calculate_rto_rate for RTO questions)
+    3. If no specific tool fits, use execute_custom_query with a custom SQL query that INCLUDES user_id filter
+    4. The predefined KPI tools already handle user_id filtering automatically
+    5. Use AT LEAST 2 tools to gather comprehensive data if no data fallback to use execute_custom_query tool
+    6. Use Interval past 50 days by setting days param to 50
+    7. Return the tool results clearly
+
+    Choose the most appropriate tool(s) and execute them to gather the necessary data to provide informed recommendations."""
+        
+        try:
+            # Run agent
+            result = await agent.ainvoke({"messages": [HumanMessage(content=agent_prompt)]})
+            
+            # Extract results from agent messages
+            agent_response = result['messages'][-1].content
+            
+            # Store KPI results by looking for ToolMessage objects
+            from langchain_core.messages import ToolMessage
+            
+            for msg in result['messages']:
+                if isinstance(msg, ToolMessage):
+                    # ToolMessage contains the actual tool output
+                    tool_name = msg.name  # Tool name
+                    tool_content = msg.content  # Tool output
+                    
+                    # Try to parse as JSON if it's a string
+                    try:
+                        if isinstance(tool_content, str):
+                            state.kpi_results[tool_name] = json.loads(tool_content)
+                        else:
+                            state.kpi_results[tool_name] = tool_content
+                    except json.JSONDecodeError:
+                        # If not JSON, store as-is
+                        state.kpi_results[tool_name] = tool_content
+                                    
+            return agent_response
+            
+        except Exception as e:
+            print(f"Agent execution error: {e}")
+            return f"Error: Could not process query - {str(e)}", None, None
     
     async def _decide_chart_need(self, preview_df: DataFrame, query: str) -> bool:
         """Decide if the query results need a chart visualization"""
-        if not preview_df is not None or len(preview_df) == 0:
+        if preview_df is None or len(preview_df) == 0:
             return False
         
         df = preview_df
         
         # Simple heuristics first
-        # Single value results don't need charts
         if len(df) == 1 and len(df.columns) <= 2:
             return False
         
-        # Count queries with single result don't need charts
         if len(df) == 1 and any(col.lower() in ['count', 'total', 'sum'] for col in df.columns):
             return False
                 
@@ -316,6 +773,7 @@ Respond with ONLY "YES" or "NO"."""
         try:
             response = await self.chart_llm.ainvoke([HumanMessage(content=decision_prompt)])
             decision = response.content.strip().upper()
+            print(f"DECISION: {decision}")
             return "YES" in decision
         except Exception as e:
             print(f"Chart decision error: {e}")
@@ -346,8 +804,8 @@ Return JSON with this structure:
 Guidelines:
 - Use exact column names from the data
 - bar: for categories comparison
-- line: for **time series** or trends
-- pie: for **proportions** (max 10 categories), **breakdown** of orders
+- line: for time series or trends
+- pie: for proportions (max 10 categories)
 - Choose most appropriate chart type
 
 Output ONLY valid JSON."""
@@ -355,7 +813,6 @@ Output ONLY valid JSON."""
         try:
             response = await self.config_llm.ainvoke([HumanMessage(content=config_prompt)])
             config_str = response.content.strip()
-            print(f"config:{config_str}")
             
             # Extract JSON from response
             config_str = re.sub(r'```json\s*|\s*```', '', config_str).strip()
@@ -378,20 +835,15 @@ Output ONLY valid JSON."""
             x_col = config['x_column']
             y_col = config['y_column']
             
-            # Make a copy to avoid modifying original
             df_plot = df.copy()
             
-            # Convert datetime columns to string for better display
             if pd.api.types.is_datetime64_any_dtype(df_plot[x_col]):
                 df_plot[x_col] = df_plot[x_col].dt.strftime('%Y-%m-%d')
             
-            # Ensure y column is numeric
             df_plot[y_col] = pd.to_numeric(df_plot[y_col], errors='coerce')
             
-            # Create figure
             fig, ax = plt.subplots(figsize=(12, 6))
             
-            # Create chart based on type
             if chart_type == 'bar':
                 ax.bar(df_plot[x_col], df_plot[y_col])
                 plt.xticks(rotation=45, ha='right')
@@ -408,22 +860,18 @@ Output ONLY valid JSON."""
                 ax.bar(df_plot[x_col], df_plot[y_col])
                 plt.xticks(rotation=45, ha='right')
             
-            # Apply labels
             ax.set_title(config.get('title', 'Chart'), fontsize=14, fontweight='bold')
             if chart_type != 'pie':
                 ax.set_xlabel(config.get('xlabel', x_col), fontsize=11)
                 ax.set_ylabel(config.get('ylabel', y_col), fontsize=11)
             
-            # Style improvements
             ax.grid(True, alpha=0.3, linestyle='--')
             plt.tight_layout()
             
-            # Save to buffer
             buffer = BytesIO()
             plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
             buffer.seek(0)
             
-            # Encode as base64
             image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
             plt.close(fig)
             buffer.close()
@@ -434,10 +882,25 @@ Output ONLY valid JSON."""
             return None
     
     async def _stream_answer(self, state: ConversationState, query: str) -> AsyncGenerator[str, None]:
-        """Step 4: Stream the formatted answer"""
-        if state.is_sql_query and state.query_result:
-            # Format SQL results as table
-            system_prompt = """You are given query results that include column names and row data.  
+        """Stream the formatted answer based on intent"""
+        
+        if state.query_intent == QueryIntent.GENERAL_KNOWLEDGE:
+            # Simple conversational response
+            system_prompt = "You are a helpful assistant. Answer the user's question directly and conversationally."
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                ("human", "{query}")
+            ])
+            
+            chain = prompt | self.answer_llm
+            async for chunk in chain.astream({"query": query}):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+        
+        elif state.query_intent == QueryIntent.DATA_QUERY:
+            # Format data results
+            if state.query_result:
+                system_prompt = """You are given query results that include column names and row data.  
 Your task is to present the results in a clear and readable format.  
 
 ### Formatting Rules:
@@ -454,30 +917,65 @@ Your task is to present the results in a clear and readable format.
 
 4. When a table is presented, include a brief summary (before or after the table) explaining what the data shows.
 
-5. The input data you get is only a preview portion of the full data (The first 10 rows or less)
-"""
+5. The input data you get is only a preview portion of the full data (The first 10 rows or less)"""
+                
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", system_prompt),
+                    ("human", "Original question: {query}\n\nQuery results:\n{results}")
+                ])
+                
+                chain = prompt | self.answer_llm
+                async for chunk in chain.astream({"query": query, "results": state.query_result}):
+                    if hasattr(chunk, 'content') and chunk.content:
+                        yield chunk.content
+        
+        elif state.query_intent == QueryIntent.RECOMMENDATION:
+            # Provide strategic recommendations based on KPI data
+            kpi_context = ""
+            if state.kpi_results:
+                kpi_context = "\n\nRelevant KPI Data:\n"
+                for tool_name, result in state.kpi_results.items():
+                    kpi_context += f"- {tool_name}: {json.dumps(result, indent=2)}\n"
+                print(f"KPI CONTEXT: {kpi_context}")
             
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "Original question: {query}\n\nQuery results:\n{results}")
-            ])
-        else:
-            # General response
-            system_prompt = "You are a helpful assistant. Answer the user's question directly and conversationally."
+            system_prompt = f"""You are a logistics and e-commerce expert providing strategic recommendations.
+
+The user has asked for advice/recommendations. Use the KPI data provided to give actionable insights.
+
+Guidelines:
+1. Start with a brief analysis of their current situation based on KPIs don't execeed 5 lines
+2. Provide 3-5 specific, actionable recommendations
+3. Explain the reasoning behind each recommendation
+4. Prioritize recommendations by impact
+5. Use data to support your recommendations
+
+{kpi_context}
+
+Be concise but thorough. Focus on practical steps they can take."""
+            
+            system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
             prompt = ChatPromptTemplate.from_messages([
                 ("system", system_prompt),
                 ("human", "{query}")
             ])
+            
+            chain = prompt | self.answer_llm
+            async for chunk in chain.astream({"query": query}):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
         
-        chain = prompt | self.answer_llm
-        
-        input_data = {"query": query}
-        if state.query_result:
-            input_data["results"] = state.query_result
-        
-        async for chunk in chain.astream(input_data):
-            if hasattr(chunk, 'content') and chunk.content:
-                yield chunk.content
+        else:  # AMBIGUOUS
+            # Try to clarify or provide best-effort response
+            system_prompt = "You are a helpful assistant. Answer the question as best you can."
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                ("human", "{query}")
+            ])
+            
+            chain = prompt | self.answer_llm
+            async for chunk in chain.astream({"query": query}):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
     
     async def stream_response(
         self, 
@@ -491,48 +989,77 @@ Your task is to present the results in a clear and readable format.
             self.conversations[thread_id] = ConversationState()
 
         user_id = thread_id.split("_")[1]
+        self.current_user_id = user_id
         
         state = self.conversations[thread_id]
         state.messages.append(HumanMessage(content=query))
         
-        # Step 1: Search similar questions
-        await self._search_similar(state, query)
+        # Step 1: Detect intent
+        state.query_intent = await self._detect_query_intent(query)
+        print(f"Detected intent: {state.query_intent}")
         
-        # Step 2 & 3: Generate and execute SQL if needed
-        if state.is_sql_query:
-            sql_query = await self._generate_sql(state, query, user_id)
-            state.last_sql_query = sql_query
+        # Step 2: Handle based on intent
+        if state.query_intent == QueryIntent.GENERAL_KNOWLEDGE:
+            # No data fetching needed, just stream answer
+            async for chunk in self._stream_answer(state, query):
+                yield chunk
+            return
+        
+        elif state.query_intent == QueryIntent.DATA_QUERY:
+            # Search similar questions
+            await self._search_similar(state, query)
             
-            if sql_query:
-                preview_result, preview_df, full_df = self._execute_query(sql_query, user_id)
-                state.query_result = preview_result
-                state.full_dataframe = full_df
-                print(preview_df)
-                # Check for errors
-                if state.query_result.startswith("Error:"):
-                    yield f"I encountered an error executing the query: {state.query_result}\n"
-                    return
-        
-        # Step 4: Stream the answer
-        async for chunk in self._stream_answer(state, query):
-            yield chunk
-        
-        # Step 5: Generate chart if needed
-        if state.is_sql_query and preview_df is not None:
-            needs_chart = await self._decide_chart_need(preview_df, query)
-            print(needs_chart)
+            # Use agent to handle data query
+            result, preview_df, full_df = await self._handle_data_query(
+                query, user_id, state
+            )
             
-            if needs_chart:
-                yield "\n\n📊 Generating visualization...\n"
-                
-                chart_config = await self._generate_chart_config(preview_df, query)
-                print(chart_config)
+            state.query_result = result
+            state.full_dataframe = full_df
+            
+            # Check for errors
+            if state.query_result and state.query_result.startswith("Error:"):
+                yield f"I encountered an error: {state.query_result}\n"
+                return
+            
+            # Stream the answer
+            async for chunk in self._stream_answer(state, query):
+                yield chunk
 
-                if chart_config:
-                    chart_image = self._create_chart(preview_df, chart_config)
-                    if chart_image:
-                        # Return JSON-like object at the end
-                        state.chart_data = chart_image
+            # Generate chart if needed
+            if preview_df is not None and len(preview_df) > 0:
+                needs_chart = await self._decide_chart_need(preview_df, query)
+                
+                if needs_chart:
+                    yield "\n\n📊 Generating visualization...\n"
+                    
+                    chart_config = await self._generate_chart_config(preview_df, query)
+                    
+                    if chart_config:
+                        chart_image = self._create_chart(preview_df, chart_config)
+                        if chart_image:
+                            state.chart_data = chart_image
+        
+        elif state.query_intent == QueryIntent.RECOMMENDATION:
+                        
+            # Use agent to gather KPIs
+            result = await self._handle_recommendation_query(
+                query, user_id, state
+            )
+            
+            # Store the gathered data
+            if result and not result.startswith("Error:"):
+                state.query_result = result
+            
+            # Now stream strategic recommendations
+            async for chunk in self._stream_answer(state, query):
+                yield chunk
+        
+        else:  # AMBIGUOUS
+            # Try best-effort approach
+            yield "I'm not entirely sure what you're asking for. Let me try to help:\n\n"
+            async for chunk in self._stream_answer(state, query):
+                yield chunk
     
     def get_last_dataframe(self, thread_id: str = "default") -> Optional[pd.DataFrame]:
         """Get the full DataFrame from the last query in this conversation thread"""
@@ -549,6 +1076,10 @@ Your task is to present the results in a clear and readable format.
             self.conversations[thread_id].chart_data = None
             return chart_data
         return None
+    
+    def get_conversation_state(self, thread_id: str = "default") -> Optional[ConversationState]:
+        """Get the conversation state for debugging/analysis"""
+        return self.conversations.get(thread_id)
     
     def clear_conversation(self, thread_id: str = "default"):
         """Clear conversation history"""

@@ -160,24 +160,6 @@ async def chat(request: Request, query_request: QueryRequest):
             stream_response(query_request.query, thread_id),
             media_type="text/plain"
         )
- 
-@app.get("/ai/chat/{thread_id}/check/excel", tags=["AI"])
-async def check_query_results(thread_id: str):
-    """
-    Check if query results are available for download.
-    Returns: {"has_data": bool, "row_count": int}
-    """
-    if not sql_agent:
-        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
-    
-    df = sql_agent.get_last_dataframe(thread_id)
-    has_data = df is not None and not df.empty
-    row_count = len(df) if has_data else 0
-    
-    return {
-        "has_data": has_data,
-        "row_count": row_count
-    }
 
 @app.get("/ai/chat/{thread_id}/download/excel", tags=["AI"])
 async def download_query_results(thread_id: str):
@@ -222,21 +204,6 @@ async def download_query_results(thread_id: str):
         logger.error(f"Error generating Excel: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate Excel: {str(e)}")
 
-@app.get("/ai/chat/{thread_id}/check/chart", tags=["AI"])
-async def check_chart_data(thread_id: str):
-    """
-    Check if query results are available for download.
-    Returns: {"has_data": bool, "row_count": int}
-    """
-    if not sql_agent:
-        raise HTTPException(status_code=500, detail="SQL Agent not initialized")
-    
-    data = sql_agent.get_last_chart_data(thread_id)
-    has_data = data is not None
-  
-    return {
-        "has_data": has_data
-    }
 
 @app.get("/ai/chat/{thread_id}/download/chart", tags=["AI"])
 async def download_chart(thread_id: str):

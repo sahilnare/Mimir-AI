@@ -35,7 +35,7 @@ def stream_chat_response(query: str, user_id: str, is_customer: bool) -> Generat
                 "is_customer": is_customer            
                 },
             stream=True,
-            timeout=100
+            timeout=200
         )
 
         if response.status_code == 200:
@@ -48,33 +48,13 @@ def stream_chat_response(query: str, user_id: str, is_customer: bool) -> Generat
     except requests.exceptions.RequestException as e:
         yield f"Error connecting to API: {str(e)}"
 
-
-def check_data_available() -> tuple[bool, int]:
-    """Check if data is available for download."""
-    try:
-        thread_id = get_thread_id()
-        response = requests.get(
-            f"{API_BASE_URL}/chat/{thread_id}/check",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("has_data", False), data.get("row_count", 0)
-        
-        return False, 0
-            
-    except requests.exceptions.RequestException:
-        return False, 0
-
-
 def download_excel() -> tuple[bytes, str]:
     """Download Excel file for current thread."""
     try:
         thread_id = get_thread_id()
         
         response = requests.get(
-            f"{API_BASE_URL}/chat/{thread_id}/download",
+            f"{API_BASE_URL}/chat/{thread_id}/download/excel",
             timeout=30
         )
         
@@ -258,11 +238,7 @@ if prompt := st.chat_input("Ask a question about your data..."):
         if chart_data:
             assistant_message["chart_data"] = chart_data
             st.image(chart_data)
-        
-        # Check if Excel data is available
-        has_data, row_count = check_data_available()
-        
-        if has_data and row_count > 0:
+    
             excel_data, filename = download_excel()
             
             if excel_data and filename:
@@ -270,7 +246,6 @@ if prompt := st.chat_input("Ask a question about your data..."):
                 assistant_message["has_data"] = True
                 assistant_message["excel_data"] = excel_data
                 assistant_message["filename"] = filename
-                assistant_message["row_count"] = row_count
                 
                 # Show download button immediately
                 st.write("For inspecting the full data, please download the excel file below")
