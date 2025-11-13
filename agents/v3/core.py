@@ -71,8 +71,9 @@ class SQLAgent:
         )
         
         self.chart_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-pro",
+            model="gemini-2.5-flash",
             api_key=self.api_key,
+            temperature=0.3,
             streaming=False,
             max_output_tokens=1024
         )
