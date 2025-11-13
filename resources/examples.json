@@ -108,7 +108,14 @@
     "question": "show pincode wise delivery rate",
     "sql_query": "SELECT od.customer_pincode, o.carrier, COUNT(*) FILTER (WHERE LOWER(t.current_order_status) = 'delivered') AS delivered_count, COUNT(*) FILTER (WHERE LOWER(t.current_order_status) IN ('rto delivered','rto','rto in transit')) AS returned_count, COUNT(*) FILTER (WHERE LOWER(t.current_order_status) IN ('delivered','rto delivered','rto','rto in transit')) AS total_count, ROUND(COUNT(*) FILTER (WHERE LOWER(t.current_order_status) = 'delivered')::numeric / NULLIF(COUNT(*) FILTER (WHERE LOWER(t.current_order_status) IN ('delivered','rto delivered','rto','rto in transit')), 0), 4) AS delivery_rate FROM tracking_orders t JOIN order_details od ON t.order_id = od.order_id JOIN orders o ON t.order_id = o.order_id WHERE LOWER(t.current_order_status) IN ('delivered','rto delivered','rto','rto in transit') AND od.customer_pincode ~ '^[0-9]{6}$' AND o.user_id = 'fba993c5-c349-4e17-a29b-41e9bd14ec04' GROUP BY od.customer_pincode, o.carrier ORDER BY od.customer_pincode, delivery_rate DESC LIMIT 60;",
     "db_name": "productiondb",
-    "table_names": ["od", "o", "t"],
+    "table_names": ["order_details", "orders", "tracking_orders"],
     "tag": "pincode rate"
+  },
+  {
+    "question": "How many orders in the month of march of this year were delivered?",
+    "sql_query": "SELECT COUNT(*) AS delivered_orders_count FROM tracking_orders t JOIN orders o ON t.order_id = o.order_id WHERE LOWER(t.current_order_status) = 'delivered' AND t.ordered_date >= (DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '2 months') AND t.ordered_date < (DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '3 months') AND o.user_id = 'fba993c5-c349-4e17-a29b-41e9bd14ec04' LIMIT 60;",
+    "db_name": "productiondb",
+    "table_names": ["tracking_orders", "orders"],
+    "tag": "monthly delivered count"
   }
 ]

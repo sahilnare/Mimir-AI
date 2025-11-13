@@ -71,9 +71,8 @@ class SQLAgent:
         )
         
         self.chart_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-pro",
             api_key=self.api_key,
-            temperature=0.4,
             streaming=False,
             max_output_tokens=1024
         )
@@ -233,7 +232,7 @@ Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or am
             return QueryIntent.AMBIGUOUS
         
     def _register_kpi_tools(self, user_id: str):
-        """Create KPI calculation tools with proper schema alignment"""
+        """Create KPI calculation tools For recommendation agent"""
 
         @tool
         def calculate_rto_rate(days: int = 50) -> Dict[str, Any]:
@@ -610,6 +609,24 @@ Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or am
         
         return schema_context
     
+    def _build_tools_description(self, tools: List) -> str:
+        """
+        Build a description of available tools.
+        
+        Args:
+            tools: List of tool objects
+            
+        Returns:
+            Formatted string describing all available tools
+        """
+        descriptions = []
+        
+        for tool in tools:
+            # Basic format: tool_name: description
+            descriptions.append(f"• {tool.name}: {tool.description}")
+        
+        return "\n".join(descriptions)
+    
     async def _handle_data_query(
         self, 
         query: str, 
@@ -621,11 +638,13 @@ Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or am
         schema_context = self._get_schema_context(state)
         similar_context = ""
         if state.similar_questions:
-            similar_context = "\nSimilar Questions for Reference:\n"
+            similar_context = "\nSimilar Questions for Reference that may help you:\n"
             for i, q in enumerate(state.similar_questions[:3], 1):
                 similar_context += f"{i}. Q: {q['question']}\n   SQL: {q['sql_query']}\n\n"
         
-        sql_prompt = f"""You are a SQL expert. Generate a syntactically correct PostgreSQL query.
+        sql_prompt = f"""You are SQL expert. Generate a syntactically correct PostgreSQL query for this user question
+
+User question: {query}
 
 {schema_context}
 
@@ -635,11 +654,11 @@ Guidelines:
 - User id is {user_id}
 - Always filter by orders.user_id in your generated SQL query
 - Use schema documentation to understand table structures
-- Reference similar queries if helpful
+- Reference similar queries if helpful (Don't copy paste or entirely rely on them make sure to understand well the user question)
 - Use ORDER BY for meaningful ordering
 - Use LIKE for status matching (e.g., 'RTO%')
 - NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
-- If the question asks for "comparison", "analysis", "breakdown", "distribution", or "categorisation", use GROUP BY with aggregations
+- If the question asks or requires "comparison", "analysis", "breakdown", "distribution", "categorisation" use GROUP BY with aggregations
 - Common aggregation patterns:
   * Counts: COUNT(*), COUNT(DISTINCT column)
   * Percentages: ROUND(100.0 * COUNT(*) FILTER (WHERE condition) / NULLIF(COUNT(*), 0), 2)
@@ -655,7 +674,7 @@ Output ONLY the SQL query, nothing else."""
             # Clean SQL
             sql_query = re.sub(r'```sql\s*|\s*```', '', sql_query).strip()
 
-            print(f"Gnerated Query: {sql_query}")
+            print(f"Generated Query: {sql_query}")
             
             # Execute
             preview, preview_df, full_df = self._execute_query(sql_query, user_id)
@@ -678,6 +697,9 @@ Output ONLY the SQL query, nothing else."""
         
         schema_context = self._get_schema_context(state)
         
+        # Dynamically build tool descriptions
+        tools_description = self._build_tools_description(tools)
+        
         # Agent prompt
         agent_prompt = f"""You are a data analyst assistant with access to tools for calculating KPIs and executing SQL queries.
 
@@ -690,13 +712,11 @@ Output ONLY the SQL query, nothing else."""
     2. When using execute_custom_query tool, the SQL MUST be a POSTGRES SQL and include: WHERE o.user_id = '{user_id}' or WHERE orders.user_id = '{user_id}'
 
     **AVAILABLE TOOLS**
-    - For RTO reduction questions: calculate_rto_rate, analyze_ndr_reasons
-    - For delivery improvements: get_delivery_performance, compare_carrier_performance
-    - If you need custom data not covered by predefined tools: use execute_custom_query tool and input a valid POSTGRES Valid SQL
+    {tools_description}
 
     **Instructions:**
     1. Analyze the question and decide which tool(s) to use
-    2. If there's a specific KPI tool that fits, use it (e.g., calculate_rto_rate for RTO questions)
+    2. If there's a specific KPI tool that fits, use it
     3. If no specific tool fits, use execute_custom_query with a custom SQL query that INCLUDES user_id filter
     4. The predefined KPI tools already handle user_id filtering automatically
     5. Use AT LEAST 2 tools to gather comprehensive data if no data fallback to use execute_custom_query tool
@@ -717,18 +737,15 @@ Output ONLY the SQL query, nothing else."""
             
             for msg in result['messages']:
                 if isinstance(msg, ToolMessage):
-                    # ToolMessage contains the actual tool output
-                    tool_name = msg.name  # Tool name
-                    tool_content = msg.content  # Tool output
+                    tool_name = msg.name
+                    tool_content = msg.content
                     
-                    # Try to parse as JSON if it's a string
                     try:
                         if isinstance(tool_content, str):
                             state.kpi_results[tool_name] = json.loads(tool_content)
                         else:
                             state.kpi_results[tool_name] = tool_content
                     except json.JSONDecodeError:
-                        # If not JSON, store as-is
                         state.kpi_results[tool_name] = tool_content
                                     
             return agent_response
@@ -980,7 +997,7 @@ Be concise but thorough. Focus on practical steps they can take."""
     async def stream_response(
         self, 
         query: str, 
-        thread_id: str = "default"
+        thread_id: str = "000000000000000000000000000"
     ) -> AsyncGenerator[str, None]:
         """Main entry point: Stream response for a query"""
         

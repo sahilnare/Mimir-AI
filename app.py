@@ -239,23 +239,23 @@ if prompt := st.chat_input("Ask a question about your data..."):
             assistant_message["chart_data"] = chart_data
             st.image(chart_data)
     
-            excel_data, filename = download_excel()
+        excel_data, filename = download_excel()
+        
+        if excel_data and filename:
+            # Store excel data in the message
+            assistant_message["has_data"] = True
+            assistant_message["excel_data"] = excel_data
+            assistant_message["filename"] = filename
             
-            if excel_data and filename:
-                # Store excel data in the message
-                assistant_message["has_data"] = True
-                assistant_message["excel_data"] = excel_data
-                assistant_message["filename"] = filename
-                
-                # Show download button immediately
-                st.write("For inspecting the full data, please download the excel file below")
-                st.download_button(
-                    label=f"📥 Download Excel",
-                    data=excel_data,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_latest",
-                )
+            # Show download button immediately
+            st.write("For inspecting the full data, please download the excel file below")
+            st.download_button(
+                label=f"📥 Download Excel",
+                data=excel_data,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_latest",
+            )
 
         # Save assistant message with all data
         st.session_state.messages.append(assistant_message)

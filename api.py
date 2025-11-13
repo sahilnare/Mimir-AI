@@ -6,7 +6,7 @@ import logging
 from typing import AsyncGenerator, Optional
 from logging.handlers import RotatingFileHandler
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from io import BytesIO
 import pandas as pd
 from fastapi.responses import StreamingResponse, Response
@@ -284,15 +284,25 @@ async def add_question_pair(request: Request, question: str, sql_query: str, db_
 
 @app.post("/ai/vectorstore/add-from-json", tags=["VectorStore"])
 @limiter.limit("2/hour")
-async def add_from_json(request: Request, json_file_path: str):
-    """Add question-SQL pairs from JSON file"""
+async def add_from_json(request: Request, file: UploadFile = File(...)):
+    """Add question-SQL pairs from an uploaded JSON file"""
     try:
         if not vectorstore_manager:
             raise HTTPException(status_code=500, detail="VectorStore not initialized")
-        
-        results = await vectorstore_manager.add_questions_from_json(json_file_path)
+
+        # Read file content
+        content = await file.read()
+
+        # Parse JSON
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON format")
+
+        results = await vectorstore_manager.add_questions_from_json_data(data)
+
         return results
-        
+
     except Exception as e:
         logger.error(f"Error adding from JSON: {e}")
         raise HTTPException(status_code=500, detail=str(e))

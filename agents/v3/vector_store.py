@@ -124,83 +124,79 @@ class VectorStoreManager:
             logger.error(f"Error adding question-query pair: {e}")
             return None
     
-    async def add_questions_from_json(
+    async def add_questions_from_json_data(
         self,
-        json_file_path: str,
-        batch_size: int = 100
+        data: list
     ) -> Dict[str, Any]:
-        """Add question-query pairs from JSON file in batches"""
+        """Add question-query pairs from a JSON list"""
         try:
-            import json
-            
-            # Read JSON file
-            with open(json_file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Validate JSON structure
             if not isinstance(data, list):
-                raise ValueError("JSON file should contain a list of question-query pairs")
-            
+                raise ValueError("Input data should be a list of question-query pairs")
+
             results = {
                 'total_processed': 0,
                 'successful': 0,
+                'skipped_duplicates': 0,
                 'failed': 0,
                 'errors': []
             }
-            
-            # Process in batches
-            for i in range(0, len(data), batch_size):
-                batch = data[i:i + batch_size]
-                documents = []
-                
-                for item in batch:
-                    try:
-                        # Validate required fields
-                        if 'question' not in item or 'sql_query' not in item or 'db_name' not in item:
-                            results['failed'] += 1
-                            results['errors'].append(f"Missing required fields in item: {item}")
-                            continue
-                        
-                        # Create metadata
-                        metadata = {
-                            'sql_query': item['sql_query'],
-                            'db_name': item['db_name'],
-                            'table_names': ",".join(item.get('table_names', [])) if item.get('table_names') else '',
-                            'tag': item.get('tag', ''),
-                            'created_at': datetime.now().isoformat(),
-                        }
-                        
-                        # Create document
-                        document = Document(
-                            page_content=item['question'],
-                            metadata=metadata
-                        )
-                        
-                        documents.append(document)
-                        results['total_processed'] += 1
-                        
-                    except Exception as e:
+
+            for item in data:
+                results['total_processed'] += 1
+                try:
+                    # Validate required fields
+                    if 'question' not in item or 'sql_query' not in item or 'db_name' not in item:
                         results['failed'] += 1
-                        results['errors'].append(f"Error processing item {item}: {str(e)}")
-                
-                # Add batch to vector store
-                if documents:
-                    doc_ids = await self.add_documents(documents)
-                    results['successful'] += len(doc_ids)
-                    logger.info(f"Added batch of {len(doc_ids)} documents")
-            
-            logger.info(f"Finished processing JSON file. Results: {results}")
+                        results['errors'].append(f"Missing required fields in item: {item}")
+                        continue
+
+                    # Check for duplicates
+                    existing = self.collection.get(
+                        where={
+                            "$or": [
+                                {"sql_query": item['sql_query']},
+                                {"question": item['question']}
+                            ]
+                        }
+                    )
+
+                    if existing and len(existing["ids"]) > 0:
+                        logger.info(f"Duplicate found, skipping: {item['question']}")
+                        results['skipped_duplicates'] += 1
+                        continue
+
+                    # Add via unified function
+                    doc_id = await self.add_question_query_pair(
+                        question=item['question'],
+                        sql_query=item['sql_query'],
+                        db_name=item['db_name'],
+                        table_names=item.get('table_names'),
+                        tag=item.get('tag')
+                    )
+
+                    if doc_id:
+                        results['successful'] += 1
+                    else:
+                        results['failed'] += 1
+                        results['errors'].append(f"Failed to add: {item}")
+
+                except Exception as e:
+                    results['failed'] += 1
+                    results['errors'].append(f"Error processing item {item}: {str(e)}")
+
+            logger.info(f"Finished adding questions. Results: {results}")
             return results
-            
+
         except Exception as e:
-            logger.error(f"Error adding questions from JSON: {e}")
+            logger.error(f"Error adding questions from data: {e}")
             return {
                 'total_processed': 0,
                 'successful': 0,
+                'skipped_duplicates': 0,
                 'failed': 0,
                 'errors': [str(e)]
             }
-    
+
     async def search_similar_questions(
         self, 
         query: str, 
