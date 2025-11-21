@@ -654,7 +654,8 @@ Guidelines:
 - User id is {user_id}
 - Always filter by orders.user_id in your generated SQL query
 - Use schema documentation to understand table structures
-- Reference similar queries if helpful (Don't copy paste or entirely rely on them make sure to understand well the user question)
+- Reference similar queries if helpful
+- Use ordered_date column to sort/filter orders by date (Don't use last_updated_date unless it's explicitly mentionned by the user)
 - Use ORDER BY for meaningful ordering
 - Use LIKE for status matching (e.g., 'RTO%')
 - NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
