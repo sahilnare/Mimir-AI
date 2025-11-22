@@ -135,14 +135,21 @@ class SQLAgent:
                 
                 # Fetch ALL rows for DataFrame
                 all_rows = result_proxy.fetchall()
+                                
+                # Filter out rows containing DRAFTORDER in any column value
+                filtered_rows = []
+                for row in all_rows:
+                    has_draft = any('DRAFTORDER' in str(value).upper() for value in row if value is not None)
+                    if not has_draft:
+                        filtered_rows.append(row)
                 
-                print(f"Query returned {len(all_rows)} rows")
+                print(f"Query returned {len(filtered_rows)} rows")
                 
                 # Create full DataFrame
                 full_df = None
-                if all_rows and len(all_rows) > 5:
-                    full_df = pd.DataFrame(all_rows, columns=all_columns)
-  
+                if filtered_rows and len(filtered_rows) > 10:
+                    full_df = pd.DataFrame(filtered_rows, columns=all_columns)
+
                 # Priority columns for preview
                 preferred_columns = [
                     "order_id", "customer_city", "customer_state",
@@ -154,21 +161,21 @@ class SQLAgent:
                 if not preview_columns or len(preview_columns) < 3:
                     preview_columns = all_columns[:10]
                 
-                # Create preview DataFrame (first 10 rows with preview columns)
-                preview_rows = all_rows[:10]
+                # Create preview DataFrame
+                preview_rows = filtered_rows[:10]
                 if preview_rows:
                     preview_df = pd.DataFrame(preview_rows, columns=all_columns)[preview_columns]
                 else:
                     preview_df = pd.DataFrame(columns=preview_columns)
                 
-                # Create preview string (first 10 rows only)
+                # Create preview string
                 limited_rows = []
                 for row in preview_rows:
                     row_dict = dict(zip(all_columns, row))
                     limited_row = {k: row_dict[k] for k in preview_columns if k in row_dict}
                     limited_rows.append(limited_row)
                 
-                formatted_result = f"Columns: {preview_columns}\n\nData (showing {len(preview_rows)} of {len(all_rows)} rows):\n"
+                formatted_result = f"Columns: {preview_columns}\n\nData (showing {len(preview_rows)} of {len(filtered_rows)} rows):\n"
                 for i, row in enumerate(limited_rows, 1):
                     formatted_result += f"Row {i}: {row}\n"
                 
@@ -654,7 +661,8 @@ Guidelines:
 - User id is {user_id}
 - Always filter by orders.user_id in your generated SQL query
 - Use schema documentation to understand table structures
-- Reference similar queries if helpful (Don't copy paste or entirely rely on them make sure to understand well the user question)
+- Reference similar queries if helpful
+- Use ordered_date column to sort/filter orders by date (Don't use last_updated_date unless it's explicitly mentionned by the user)
 - Use ORDER BY for meaningful ordering
 - Use LIKE for status matching (e.g., 'RTO%')
 - NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
@@ -1047,9 +1055,7 @@ Be concise but thorough. Focus on practical steps they can take."""
             if preview_df is not None and len(preview_df) > 0:
                 needs_chart = await self._decide_chart_need(preview_df, query)
                 
-                if needs_chart:
-                    yield "\n\n📊 Generating visualization...\n"
-                    
+                if needs_chart:                    
                     chart_config = await self._generate_chart_config(preview_df, query)
                     
                     if chart_config:
