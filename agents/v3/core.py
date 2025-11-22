@@ -147,7 +147,7 @@ class SQLAgent:
                 
                 # Create full DataFrame
                 full_df = None
-                if filtered_rows and len(filtered_rows) > 5:
+                if filtered_rows and len(filtered_rows) > 10:
                     full_df = pd.DataFrame(filtered_rows, columns=all_columns)
 
                 # Priority columns for preview
