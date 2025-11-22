@@ -14,6 +14,13 @@
     "tag": "order list"
   },
   {
+    "question": "show total number of orders for this month",
+    "sql_query": "SELECT COUNT(*) FROM tracking_orders INNER JOIN orders ON tracking_orders.order_id = orders.order_id WHERE orders.user_id = 'f17d6407-9d6b-45f5-854c-30a43b4b9615' AND tracking_orders.ordered_date >= DATE_TRUNC('month', CURRENT_DATE) AND tracking_orders.ordered_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' AND tracking_orders.current_order_status_code != '0' AND tracking_orders.current_order_status != 'CHANNEL_ORDER'",
+    "db_name": "productiondb",
+    "table_names": ["orders", "order_details", "tracking_orders"],
+    "tag": "order list"
+  },
+  {
     "question": "show total number of orders for this month carrier wise",
     "sql_query": "SELECT t.carrier_name, COUNT(o.order_id) AS total_number_of_orders FROM orders AS o JOIN tracking_orders AS t ON o.order_id = t.order_id WHERE o.user_id = 'f17d6407-9d6b-45f5-854c-30a43b4b9615' AND t.ordered_date >= DATE_TRUNC('month', CURRENT_DATE) AND t.ordered_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' AND t.current_order_status_code != '0' GROUP BY t.carrier_name",
     "db_name": "productiondb",
