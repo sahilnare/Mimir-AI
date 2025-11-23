@@ -1,7 +1,5 @@
-import os
 import re
 import json
-import asyncio
 import base64
 import pandas as pd
 from pandas import DataFrame
@@ -12,7 +10,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 from enum import Enum
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities import SQLDatabase
@@ -55,7 +53,111 @@ class SQLAgent:
         self.schema_docs = self._load_schema_docs(config.get("schema_docs_path"))
         self.table_names = self._get_table_names()
         
-        # Initialize LLMs
+        # ============= SYSTEM PROMPTS =============
+        
+        self.intent_system_prompt = """You are an intent classification expert for a helpful data query assistant.
+
+Your job is to classify user queries into ONE of these categories based on the conversation context:
+
+**Categories:**
+
+1. **general_knowledge**: Greetings, small talk, questions about concepts/definitions, questions about previous calculations/methodology
+   Examples: 
+   - "Hi", "What is RTO?", "How does shipping work?", "Thank you"
+   - "How did you calculate that?", "What formula did you use?", "Explain the calculation"
+
+2. **data_query**: Questions that require fetching NEW/DIFFERENT data from database
+   Examples: "Show me orders from Mumbai", "How many RTO orders?", "List delivered shipments"
+   Follow-ups: "Show me more details", "What about Express mode?", "Break it down by city"
+
+3. **recommendation**: Questions asking for strategic advice, suggestions, or optimization strategies
+   Examples: "How to reduce RTO?", "What can I do to improve delivery rates?", "Suggest ways to optimize"
+   Follow-ups: "What else can I do?", "Any other recommendations?"
+
+4. **ambiguous**: Unclear or mixed intent
+
+**Output Format:**
+Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or ambiguous
+
+Be context-aware and consider what the user has been discussing."""
+
+        self.data_query_system_prompt = """You are a SQL expert. Generate syntactically correct PostgreSQL queries.
+
+**Guidelines:**
+- Always filter by orders.user_id in your generated SQL query
+- Use schema documentation to understand table structures
+- Reference similar queries if helpful
+- Consider conversation history for context (e.g., "show me more" means expand on previous query)
+- Use ordered_date column to sort/filter orders by date (Don't use last_updated_date unless explicitly mentioned)
+- Use ORDER BY for meaningful ordering
+- Use LIKE for status matching (e.g., 'RTO%')
+- NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
+- If the question requires "comparison", "analysis", "breakdown", "distribution", "categorisation" use GROUP BY with aggregations
+- Common aggregation patterns:
+  * Counts: COUNT(*), COUNT(DISTINCT column)
+  * Percentages: ROUND(100.0 * COUNT(*) FILTER (WHERE condition) / NULLIF(COUNT(*), 0), 2)
+  * Sums/Averages: SUM(column), AVG(column)
+- Always add LIMIT 60 to your queries
+
+**Output:** Return ONLY the SQL query, nothing else."""
+
+        self.recommendation_system_prompt = """You are a data analyst assistant with access to tools for calculating KPIs and executing SQL queries.
+
+**CRITICAL SECURITY RULES:**
+- ALWAYS filter by user_id in ALL SQL queries
+- When using execute_custom_query tool, the SQL MUST include proper user_id filtering
+
+**Instructions:**
+1. Analyze the question and conversation history for context
+2. Decide which tool(s) to use based on what data is needed
+3. If there's a specific KPI tool that fits, use it
+4. If no specific tool fits, use execute_custom_query with proper user_id filter
+5. The predefined KPI tools already handle user_id filtering automatically
+6. Use AT LEAST 2 tools to gather comprehensive data
+7. Use Interval past 50 days by setting days param to 50
+8. Return the tool results clearly"""
+
+        self.general_answer_system_prompt = """You are a helpful data query assistant. Answer the user's question directly and conversationally using the conversation context and any previous SQL queries shown."""
+
+        self.data_answer_system_prompt = """You are given query results that include column names and row data.  
+Your task is to present the results in a clear and readable format.  
+
+**Formatting Rules:**
+1. If the query results contain multiple rows:  
+   - Create a **markdown table**.  
+   - Use the column names as headers.  
+   - Display each row of data as a row in the table.  
+
+2. If the query results contain only a single row or a single value:  
+   - Do not use a table.  
+   - Instead, provide a short, natural-language description of the result.  
+
+3. Ensure the formatting is clean and easy to read.  
+
+4. When a table is presented, include a brief summary (before or after the table) explaining what the data shows.
+
+5. The input data you get is only a preview portion of the full data (The first 10 rows or less)
+
+6. Use conversation history to understand context (e.g., if user asked to "filter by Mumbai" after seeing previous results)"""
+
+        self.recommendation_answer_system_prompt = """You are a logistics and e-commerce expert providing strategic recommendations.
+
+The user has asked for advice/recommendations. Use the KPI data provided to give actionable insights.
+
+**Guidelines:**
+1. Start with a brief analysis of their current situation based on KPIs (don't exceed 5 lines)
+2. Provide 3-5 specific, actionable recommendations
+3. Explain the reasoning behind each recommendation
+4. Prioritize recommendations by impact
+5. Use data to support your recommendations
+6. Consider conversation history for context
+
+Be concise but thorough. Focus on practical steps they can take."""
+
+        self.ambiguous_answer_system_prompt = """You are a helpful assistant. Answer the question as best you can using conversation context to understand what the user wants."""
+        
+        # ============= Initialize LLMs =============
+        
         self.query_llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-pro",
             api_key=self.api_key,
@@ -194,36 +296,42 @@ class SQLAgent:
                 referenced_tables.append(table_name)
         return referenced_tables
     
-    async def _detect_query_intent(self, query: str) -> QueryIntent:
-        """Intelligently detect query intent using LLM"""
+    def _build_conversation_context(self, state: ConversationState, current_query: str) -> str:
+        """Build conversation context for LLM calls"""
+        # Get last 5 messages
+        recent_messages = state.messages[-5:] if len(state.messages) > 5 else state.messages
         
-        intent_prompt = f"""Analyze the user's query and classify it into ONE of these categories:
-
-**Categories:**
-1. **general_knowledge**: Greetings, small talk, questions about how things work, definitions, explanations that don't need data
-   Examples: "Hi", "What is RTO?", "How does shipping work?", "Explain COD"
-
-2. **data_query**: Questions that require fetching data from database
-   Examples: "Show me orders from Mumbai", "How many RTO orders?", "List delivered shipments", "Which carrier has most delays?"
-
-3. **recommendation**: Questions asking for strategic advice, suggestions, or optimization strategies
-   Examples: "How to reduce RTO?", "What can I do to improve delivery rates?", "Suggest ways to optimize shipping costs", "How to handle NDR better?"
-
-4. **ambiguous**: Unclear or mixed intent
-
-**User Query:** "{query}"
-
-**Analysis Guidelines:**
-- If asking "reccommend me", "how to", "ways to", "suggestions", "what should I do" → likely **recommendation**
-- If asking "show", "list", "how many", "which", "get", "find" → likely **data_query**
-- If general conversation or asking definitions → **general_knowledge**
-- Recommendations often need data analysis FIRST, then strategic advice
-
-Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or ambiguous"""
+        context = "**Recent Conversation:**\n"
+        for msg in recent_messages:
+            if isinstance(msg, HumanMessage):
+                context += f"User: {msg.content}\n"
+            elif isinstance(msg, AIMessage):
+                # Truncate AI responses to avoid bloat
+                content_preview = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
+                context += f"Assistant: {content_preview}\n"
         
+        context += f"\n**Current Query:** {current_query}\n"
+        
+        # Add the last SQL query if available
+        if state.last_sql_query:
+            context += f"\n**Last SQL Query Executed:**\n```sql\n{state.last_sql_query}\n```\n"
+        
+        return context
+    
+    async def _detect_query_intent(self, context:str) -> QueryIntent:
+        """Intelligently detect query intent using LLM with conversation context"""
+                
         try:
-            response = await self.intent_llm.ainvoke([HumanMessage(content=intent_prompt)])
+            # Use system prompt + conversation context
+            messages = [
+                SystemMessage(content=self.intent_system_prompt),
+                HumanMessage(content=context)
+            ]
+            
+            response = await self.intent_llm.ainvoke(messages)
             intent_str = response.content.strip().lower()
+            
+            print(f"Intent detection response: {intent_str}")
             
             # Map response to enum
             if "general_knowledge" in intent_str:
@@ -565,13 +673,13 @@ Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or am
             return preview
             
         return [
-                calculate_rto_rate,
-                get_delivery_performance,
-                analyze_ndr_reasons,
-                compare_carrier_performance,
-                analyze_order_types_and_modes,
-                execute_custom_query
-            ]
+            calculate_rto_rate,
+            get_delivery_performance,
+            analyze_ndr_reasons,
+            compare_carrier_performance,
+            analyze_order_types_and_modes,
+            execute_custom_query
+        ]
     
     async def _search_similar(self, state: ConversationState, query: str):
         """Search for similar questions in vector store"""
@@ -618,72 +726,55 @@ Respond with ONLY ONE word: general_knowledge, data_query, recommendation, or am
         return schema_context
     
     def _build_tools_description(self, tools: List) -> str:
-        """
-        Build a description of available tools.
-        
-        Args:
-            tools: List of tool objects
-            
-        Returns:
-            Formatted string describing all available tools
-        """
+        """Build a description of available tools"""
         descriptions = []
-        
         for tool in tools:
-            # Basic format: tool_name: description
             descriptions.append(f"• {tool.name}: {tool.description}")
-        
         return "\n".join(descriptions)
     
     async def _handle_data_query(
         self, 
         query: str, 
         user_id: str,
-        state: ConversationState
+        state: ConversationState,
+        context: str
     ) -> Tuple[Optional[str], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """Generate SQL and execute directly without agent framework"""
+        """Generate SQL and execute query to handle data queries"""
         
         schema_context = self._get_schema_context(state)
         similar_context = ""
         if state.similar_questions:
-            similar_context = "\nSimilar Questions for Reference that may help you:\n"
+            similar_context = "\nSimilar Questions for Reference:\n"
             for i, q in enumerate(state.similar_questions[:3], 1):
                 similar_context += f"{i}. Q: {q['question']}\n   SQL: {q['sql_query']}\n\n"
         
-        sql_prompt = f"""You are SQL expert. Generate a syntactically correct PostgreSQL query for this user question
+        # Dynamic content only (user_id, context, schema, similar questions)
+        human_message = f"""User ID: {user_id}
 
-User Question: {query}
+{context}
 
 {schema_context}
 
 {similar_context}
 
-Guidelines:
-- User id is {user_id}
-- Always filter by orders.user_id in your generated SQL query
-- Use schema documentation to understand table structures
-- Reference similar queries if helpful
-- Use ordered_date column to sort/filter orders by date (Don't use last_updated_date unless it's explicitly mentionned by the user)
-- Use ORDER BY for meaningful ordering
-- Use LIKE for status matching (e.g., 'RTO%')
-- NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
-- If the question asks or requires "comparison", "analysis", "breakdown", "distribution", "categorisation" use GROUP BY with aggregations
-- Common aggregation patterns:
-  * Counts: COUNT(*), COUNT(DISTINCT column)
-  * Percentages: ROUND(100.0 * COUNT(*) FILTER (WHERE condition) / NULLIF(COUNT(*), 0), 2)
-  * Sums/Averages: SUM(column), AVG(column)
-- Always add LIMIT 60 to your queries
-
-Output ONLY the SQL query, nothing else."""
+Generate the SQL query for the user's question."""
         
         try:
-            response = await self.query_llm.ainvoke([HumanMessage(content=sql_prompt)])
+            messages = [
+                SystemMessage(content=self.data_query_system_prompt),
+                HumanMessage(content=human_message)
+            ]
+            
+            response = await self.query_llm.ainvoke(messages)
             sql_query = response.content.strip()
             
             # Clean SQL
             sql_query = re.sub(r'```sql\s*|\s*```', '', sql_query).strip()
 
             print(f"Generated Query: {sql_query}")
+            
+            # Store the SQL query for reference
+            state.last_sql_query = sql_query
             
             # Execute
             preview, preview_df, full_df = self._execute_query(sql_query, user_id)
@@ -695,9 +786,9 @@ Output ONLY the SQL query, nothing else."""
             return f"Error: Could not process query - {str(e)}", None, None
         
     async def _handle_recommendation_query(
-        self, query: str, user_id: str, state: ConversationState
-    ) -> Tuple[Optional[str], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """Use LangGraph agent with tools to handle data queries"""
+        self, user_id: str, state: ConversationState, context: str
+    ) -> str:
+        """Use LangGraph agent with tools to handle recommendation queries"""
         # Create tools
         tools = self._register_kpi_tools(user_id)
         
@@ -709,34 +800,26 @@ Output ONLY the SQL query, nothing else."""
         # Dynamically build tool descriptions
         tools_description = self._build_tools_description(tools)
         
-        # Agent prompt
-        agent_prompt = f"""You are a data analyst assistant with access to tools for calculating KPIs and executing SQL queries.
+        # Dynamic content only (user_id, context, schema, tools)
+        human_message = f"""User ID: {user_id}
 
-    User Question: {query}
+{context}
 
-    {schema_context}
+{schema_context}
 
-    **CRITICAL SECURITY RULES:**
-    1. ALWAYS filter by '{user_id}' in ALL SQL queries
-    2. When using execute_custom_query tool, the SQL MUST be a POSTGRES SQL and include: WHERE orders.user_id = '{user_id}'
+**AVAILABLE TOOLS**
+{tools_description}
 
-    **AVAILABLE TOOLS**
-    {tools_description}
-
-    **Instructions:**
-    1. Analyze the question and decide which tool(s) to use
-    2. If there's a specific KPI tool that fits, use it
-    3. If no specific tool fits, use execute_custom_query with a custom SQL query that INCLUDES user_id filter
-    4. The predefined KPI tools already handle user_id filtering automatically
-    5. Use AT LEAST 2 tools to gather comprehensive data if no data fallback to use execute_custom_query tool
-    6. Use Interval past 50 days by setting days param to 50
-    7. Return the tool results clearly
-
-    Choose the most appropriate tool(s) and execute them to gather the necessary data to provide informed recommendations."""
+Choose the most appropriate tool(s) and execute them to gather the necessary data."""
         
         try:
-            # Run agent
-            result = await agent.ainvoke({"messages": [HumanMessage(content=agent_prompt)]})
+            # Run agent with system message
+            result = await agent.ainvoke({
+                "messages": [
+                    SystemMessage(content=self.recommendation_system_prompt),
+                    HumanMessage(content=human_message)
+                ]
+            })
             
             # Extract results from agent messages
             agent_response = result['messages'][-1].content
@@ -761,7 +844,7 @@ Output ONLY the SQL query, nothing else."""
             
         except Exception as e:
             print(f"Agent execution error: {e}")
-            return f"Error: Could not process query - {str(e)}", None, None
+            return f"Error: Could not process query - {str(e)}"
     
     async def _decide_chart_need(self, preview_df: DataFrame, query: str) -> bool:
         """Decide if the query results need a chart visualization"""
@@ -907,56 +990,38 @@ Output ONLY valid JSON."""
             print(f"Chart creation error: {e}")
             return None
     
-    async def _stream_answer(self, state: ConversationState, query: str) -> AsyncGenerator[str, None]:
+    async def _stream_answer(self, state: ConversationState, context: str) -> AsyncGenerator[str, None]:
         """Stream the formatted answer based on intent"""
         
         if state.query_intent == QueryIntent.GENERAL_KNOWLEDGE:
-            # Simple conversational response
-            system_prompt = "You are a helpful assistant. Answer the user's question directly and conversationally."
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "{query}")
-            ])
+            # Dynamic content only
+            human_message = f"{context}\n\nProvide a helpful response to the user."
             
-            chain = prompt | self.answer_llm
-            async for chunk in chain.astream({"query": query}):
+            messages = [
+                SystemMessage(content=self.general_answer_system_prompt),
+                HumanMessage(content=human_message)
+            ]
+            
+            async for chunk in self.answer_llm.astream(messages):
                 if hasattr(chunk, 'content') and chunk.content:
                     yield chunk.content
         
         elif state.query_intent == QueryIntent.DATA_QUERY:
-            # Format data results
             if state.query_result:
-                system_prompt = """You are given query results that include column names and row data.  
-Your task is to present the results in a clear and readable format.  
-
-### Formatting Rules:
-1. If the query results contain multiple rows:  
-   - Create a **markdown table**.  
-   - Use the column names as headers.  
-   - Display each row of data as a row in the table.  
-
-2. If the query results contain only a single row or a single value:  
-   - Do not use a table.  
-   - Instead, provide a short, natural-language description of the result.  
-
-3. Ensure the formatting is clean and easy to read.  
-
-4. When a table is presented, include a brief summary (before or after the table) explaining what the data shows.
-
-5. The input data you get is only a preview portion of the full data (The first 10 rows or less)"""
+                # Dynamic content only
+                human_message = f"{context}\n\nQuery results:\n{state.query_result}\n\nFormat and present these results clearly."
                 
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", system_prompt),
-                    ("human", "Original question: {query}\n\nQuery results:\n{results}")
-                ])
+                messages = [
+                    SystemMessage(content=self.data_answer_system_prompt),
+                    HumanMessage(content=human_message)
+                ]
                 
-                chain = prompt | self.answer_llm
-                async for chunk in chain.astream({"query": query, "results": state.query_result}):
+                async for chunk in self.answer_llm.astream(messages):
                     if hasattr(chunk, 'content') and chunk.content:
                         yield chunk.content
         
         elif state.query_intent == QueryIntent.RECOMMENDATION:
-            # Provide strategic recommendations based on KPI data
+            # Build KPI context (dynamic)
             kpi_context = ""
             if state.kpi_results:
                 kpi_context = "\n\nRelevant KPI Data:\n"
@@ -964,42 +1029,28 @@ Your task is to present the results in a clear and readable format.
                     kpi_context += f"- {tool_name}: {json.dumps(result, indent=2)}\n"
                 print(f"KPI CONTEXT: {kpi_context}")
             
-            system_prompt = f"""You are a logistics and e-commerce expert providing strategic recommendations.
-
-The user has asked for advice/recommendations. Use the KPI data provided to give actionable insights.
-
-Guidelines:
-1. Start with a brief analysis of their current situation based on KPIs don't execeed 5 lines
-2. Provide 3-5 specific, actionable recommendations
-3. Explain the reasoning behind each recommendation
-4. Prioritize recommendations by impact
-5. Use data to support your recommendations
-
-{kpi_context}
-
-Be concise but thorough. Focus on practical steps they can take."""
+            # Dynamic content only
+            human_message = f"{context}\n{kpi_context}\n\nProvide strategic recommendations based on the data gathered."
             
-            system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "{query}")
-            ])
+            messages = [
+                SystemMessage(content=self.recommendation_answer_system_prompt),
+                HumanMessage(content=human_message)
+            ]
             
-            chain = prompt | self.answer_llm
-            async for chunk in chain.astream({"query": query}):
+            async for chunk in self.answer_llm.astream(messages):
                 if hasattr(chunk, 'content') and chunk.content:
                     yield chunk.content
         
         else:  # AMBIGUOUS
-            # Try to clarify or provide best-effort response
-            system_prompt = "You are a helpful assistant. Answer the question as best you can."
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "{query}")
-            ])
+            # Dynamic content only
+            human_message = f"{context}\n\nProvide the best response you can based on the context."
             
-            chain = prompt | self.answer_llm
-            async for chunk in chain.astream({"query": query}):
+            messages = [
+                SystemMessage(content=self.ambiguous_answer_system_prompt),
+                HumanMessage(content=human_message)
+            ]
+            
+            async for chunk in self.answer_llm.astream(messages):
                 if hasattr(chunk, 'content') and chunk.content:
                     yield chunk.content
     
@@ -1018,26 +1069,36 @@ Be concise but thorough. Focus on practical steps they can take."""
         self.current_user_id = user_id
         
         state = self.conversations[thread_id]
+        
+        # Add user message to history 
         state.messages.append(HumanMessage(content=query))
         
-        # Step 1: Detect intent
-        state.query_intent = await self._detect_query_intent(query)
+        # Build conversation context
+        context = self._build_conversation_context(state, query)
+        
+        # Step 1: Detect intent with conversation context
+        state.query_intent = await self._detect_query_intent(context)
         print(f"Detected intent: {state.query_intent}")
         
         # Step 2: Handle based on intent
         if state.query_intent == QueryIntent.GENERAL_KNOWLEDGE:
             # No data fetching needed, just stream answer
-            async for chunk in self._stream_answer(state, query):
+            answer_content = ""
+            async for chunk in self._stream_answer(state, context):
+                answer_content += chunk
                 yield chunk
+            
+            # Add AI response to history
+            state.messages.append(AIMessage(content=answer_content))
             return
         
         elif state.query_intent == QueryIntent.DATA_QUERY:
             # Search similar questions
             await self._search_similar(state, query)
             
-            # Use agent to handle data query
+            # Use direct SQL generation to handle data query
             result, preview_df, full_df = await self._handle_data_query(
-                query, user_id, state
+                query, user_id, state, context
             )
             
             state.query_result = result
@@ -1045,12 +1106,19 @@ Be concise but thorough. Focus on practical steps they can take."""
             
             # Check for errors
             if state.query_result and state.query_result.startswith("Error:"):
-                yield f"I encountered an error: {state.query_result}\n"
+                error_msg = f"I encountered an error: {state.query_result}\n"
+                state.messages.append(AIMessage(content=error_msg))
+                yield error_msg
                 return
             
             # Stream the answer
-            async for chunk in self._stream_answer(state, query):
+            answer_content = ""
+            async for chunk in self._stream_answer(state, context):
+                answer_content += chunk
                 yield chunk
+            
+            # Add AI response to history
+            state.messages.append(AIMessage(content=answer_content))
 
             # Generate chart if needed
             if preview_df is not None and len(preview_df) > 0:
@@ -1065,25 +1133,34 @@ Be concise but thorough. Focus on practical steps they can take."""
                             state.chart_data = chart_image
         
         elif state.query_intent == QueryIntent.RECOMMENDATION:
-                        
             # Use agent to gather KPIs
-            result = await self._handle_recommendation_query(
-                query, user_id, state
-            )
+            result = await self._handle_recommendation_query(user_id, state, context)
             
             # Store the gathered data
             if result and not result.startswith("Error:"):
                 state.query_result = result
             
             # Now stream strategic recommendations
-            async for chunk in self._stream_answer(state, query):
+            answer_content = ""
+            async for chunk in self._stream_answer(state, context):
+                answer_content += chunk
                 yield chunk
+            
+            # Add AI response to history
+            state.messages.append(AIMessage(content=answer_content))
         
         else:  # AMBIGUOUS
             # Try best-effort approach
-            yield "I'm not entirely sure what you're asking for. Let me try to help:\n\n"
-            async for chunk in self._stream_answer(state, query):
+            prefix = "I'm not entirely sure what you're asking for. Let me try to help:\n\n"
+            yield prefix
+            
+            answer_content = prefix
+            async for chunk in self._stream_answer(state, context):
+                answer_content += chunk
                 yield chunk
+            
+            # Add AI response to history
+            state.messages.append(AIMessage(content=answer_content))
     
     def get_last_dataframe(self, thread_id: str = "default") -> Optional[pd.DataFrame]:
         """Get the full DataFrame from the last query in this conversation thread"""
@@ -1102,7 +1179,7 @@ Be concise but thorough. Focus on practical steps they can take."""
         return None
     
     def get_conversation_state(self, thread_id: str = "default") -> Optional[ConversationState]:
-        """Get the conversation state for debugging/analysis"""
+        """Get the conversation state"""
         return self.conversations.get(thread_id)
     
     def clear_conversation(self, thread_id: str = "default"):
