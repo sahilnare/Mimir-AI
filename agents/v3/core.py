@@ -89,6 +89,7 @@ Be context-aware and consider what the user has been discussing."""
 - Reference similar queries if helpful
 - Consider conversation history for context (e.g., "show me more" means expand on previous query)
 - Use ordered_date column to sort/filter orders by date (Don't use last_updated_date unless explicitly mentioned)
+- Always add these conditions for queries that involve tracking_orders table (tracking_orders.current_order_status != 'CHANNEL_ORDER' AND tracking_orders.current_order_status_code != '0')
 - Use ORDER BY for meaningful ordering
 - Use LIKE for status matching (e.g., 'RTO%')
 - NEVER make DML statements (INSERT, UPDATE, DELETE, DROP, etc.)
@@ -330,9 +331,7 @@ Be concise but thorough. Focus on practical steps they can take."""
             
             response = await self.intent_llm.ainvoke(messages)
             intent_str = response.content.strip().lower()
-            
-            print(f"Intent detection response: {intent_str}")
-            
+                        
             # Map response to enum
             if "general_knowledge" in intent_str:
                 return QueryIntent.GENERAL_KNOWLEDGE

@@ -5,7 +5,6 @@ from langchain.schema import Document
 import chromadb
 from chromadb.config import Settings
 import asyncio
-import re 
 import logging
 import uuid
 from pathlib import Path
@@ -123,6 +122,7 @@ class VectorStoreManager:
         except Exception as e:
             logger.error(f"Error adding question-query pair: {e}")
             return None
+        
     
     async def add_questions_from_json_data(
         self,
@@ -136,11 +136,29 @@ class VectorStoreManager:
             results = {
                 'total_processed': 0,
                 'successful': 0,
-                'skipped_duplicates': 0,
                 'failed': 0,
                 'errors': []
             }
 
+            # Clear and reinitialize the vector store
+            logger.info("Clearing all documents from collection...")
+            try:
+                # Get all document IDs from the collection
+                all_docs = self.collection.get()
+                
+                if all_docs and all_docs['ids']:
+                    # Delete all documents by their IDs
+                    self.collection.delete(ids=all_docs['ids'])
+                    logger.info(f"Deleted {len(all_docs['ids'])} documents from collection")
+                else:
+                    logger.info("Collection is already empty")
+                    
+            except Exception as e:
+                logger.error(f"Error clearing collection: {e}")
+                results['errors'].append("Failed to clear collection")
+                return results
+
+            # Process all items from JSON
             for item in data:
                 results['total_processed'] += 1
                 try:
@@ -150,22 +168,7 @@ class VectorStoreManager:
                         results['errors'].append(f"Missing required fields in item: {item}")
                         continue
 
-                    # Check for duplicates
-                    existing = self.collection.get(
-                        where={
-                            "$or": [
-                                {"sql_query": item['sql_query']},
-                                {"question": item['question']}
-                            ]
-                        }
-                    )
-
-                    if existing and len(existing["ids"]) > 0:
-                        logger.info(f"Duplicate found, skipping: {item['question']}")
-                        results['skipped_duplicates'] += 1
-                        continue
-
-                    # Add via unified function
+                    # Add the question-query pair
                     doc_id = await self.add_question_query_pair(
                         question=item['question'],
                         sql_query=item['sql_query'],
@@ -184,7 +187,7 @@ class VectorStoreManager:
                     results['failed'] += 1
                     results['errors'].append(f"Error processing item {item}: {str(e)}")
 
-            logger.info(f"Finished adding questions. Results: {results}")
+            logger.info(f"Finished importing questions. Results: {results}")
             return results
 
         except Exception as e:
@@ -192,11 +195,10 @@ class VectorStoreManager:
             return {
                 'total_processed': 0,
                 'successful': 0,
-                'skipped_duplicates': 0,
                 'failed': 0,
-                'errors': [str(e)]
+                'errors': [str(e)],
             }
-
+    
     async def search_similar_questions(
         self, 
         query: str, 
